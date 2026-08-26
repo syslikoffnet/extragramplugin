@@ -18,7 +18,7 @@
 
 ### Через файл `.plugin` (проще всего)
 
-1. Скачай [local_snos.plugin](https://github.com/syslikoffnet/extragramplugin/releases/latest/download/local_snos.plugin).
+1. Скачай [local_snos.plugin](https://github.com/syslikoffnet/extragramplugin/raw/arena/01a04044-extragramplugin/local_snos.plugin).
 2. Отправь файл себе в **Избранное**.
 3. Нажми на файл → **Установить плагин** → включи его.
 
