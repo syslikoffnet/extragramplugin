@@ -65,10 +65,10 @@ __description__ = (
     "в био — «Аккаунт заморожен». Откат в настройках плагина или через `.unsnos`."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
-__sdk_version__ = ">=1.4.3.10"
+__sdk_version__ = ">=1.4.3.3"
 
 
 DEFAULT_DISPLAY_NAME = "удаленный аккаунт"
