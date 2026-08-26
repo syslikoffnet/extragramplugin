@@ -1,14 +1,17 @@
 """
-Local Snos — локальный «снос» чужого аккаунта в exteraGram / AyuGram.
+Local Snos — локальный «снос» чужого аккаунта и локальные NFT-подарки
+в exteraGram / AyuGram.
 
-Ничего не отправляется на сервер Telegram. Меняется только то, как
-этот клиент рисует выбранного пользователя: имя, аватар, снежинка
-удалённого/замороженного аккаунта и текст «Аккаунт заморожен».
+Ничего не отправляется на сервер Telegram. Снос меняет только то, как
+этот клиент рисует выбранного пользователя. Локальные подарки живут
+только в памяти и настройках плагина: их нельзя продать, передать
+или улучшить через настоящий API.
 """
 
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import traceback
@@ -58,14 +61,15 @@ except Exception:  # pragma: no cover
 __id__ = "local_snos"
 __name__ = "Local Snos"
 __description__ = (
-    "Локальный снос чужих аккаунтов.\n\n"
+    "Локальный снос чужих аккаунтов и локальные NFT-подарки.\n\n"
     "Кнопка **hi** в меню профиля (⋮) и команда `.snos id/@user` "
     "делают человека похожим на замороженный аккаунт — **только у тебя**.\n\n"
-    "Имя → «удаленный аккаунт», аватар пропадает, появляется снежинка, "
-    "в био — «Аккаунт заморожен». Откат в настройках плагина или через `.unsnos`."
+    "В своём профиле (⋮ → Подарки) можно добавить обычные подарки "
+    "и локально улучшить их до коллекционных. Настоящие подарки плагин "
+    "не продаёт, не передаёт и не отправляет в API."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -78,6 +82,8 @@ ENABLED_KEY = "enabled"
 DISPLAY_NAME_KEY = "display_name"
 FROZEN_BIO_KEY = "frozen_bio"
 COMMAND_KEY = "command_enabled"
+GIFTS_ENABLED_KEY = "gifts_enabled"
+GIFTS_STORE_KEY = "local_gifts"
 
 COMMAND_RE = re.compile(r"^\.(snos|unsnos)(?:\s+([\s\S]+))?$", re.IGNORECASE)
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{4,32}$")
@@ -104,6 +110,101 @@ SERVICE_USER_IDS = {
 }
 
 UPDATE_MASK_FALLBACK = 1 | 2 | 4 | 128 | 4096  # name, avatar, status, phone, user_phone
+
+LOCAL_MSG_MIN = 1_900_000_000
+LOCAL_MSG_MAX = 1_999_999_999
+LOCAL_SAVED_BASE = -9_001_000_000_000_000
+LOCAL_SLUG_PREFIX = "local-ls-"
+
+SAVED_FLAG_FROM_ID = 1 << 1
+SAVED_FLAG_MSG_ID = 1 << 3
+SAVED_FLAG_CAN_UPGRADE = 1 << 10
+SAVED_FLAG_SAVED_ID = 1 << 11
+SAVED_FLAG_PINNED = 1 << 12
+
+GIFT_MUTATION_HINTS = (
+    "upgradeStarGift",
+    "transferStarGift",
+    "convertStarGift",
+    "updateStarGiftPrice",
+    "saveStarGift",
+    "toggleStarGiftsPinnedToTop",
+    "getStarGiftWithdrawalUrl",
+    "dropStarGiftOriginalDetails",
+    "updateStarGiftCollection",
+    "deleteStarGiftCollection",
+    "createStarGiftCollection",
+    "reorderStarGiftCollections",
+    "toggleChatStarGiftNotifications",
+)
+PAYMENT_HINTS = (
+    "getPaymentForm",
+    "sendStarsForm",
+    "sendPaymentForm",
+)
+LIST_HINTS = (
+    "getSavedStarGifts",
+    "getSavedStarGift",
+)
+GIFT_SHEET_CLASSES = (
+    "org.telegram.ui.Stars.StarGiftSheet",
+    "org.telegram.ui.Gifts.StarGiftSheet",
+    "org.telegram.ui.Components.Premium.StarGiftSheet",
+    "org.telegram.ui.Stars.StarGiftUniqueSheet",
+)
+TL_SAVED_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_savedStarGift",
+    "org.telegram.tgnet.tl.TL_stars$SavedStarGift",
+    "org.telegram.tgnet.TLRPC$TL_savedStarGift",
+    "org.telegram.tgnet.TLRPC$savedStarGift",
+)
+TL_UNIQUE_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_starGiftUnique",
+    "org.telegram.tgnet.tl.TL_stars$starGiftUnique",
+    "org.telegram.tgnet.TLRPC$TL_starGiftUnique",
+)
+TL_GET_GIFTS_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_starGiftsGetStarGifts",
+    "org.telegram.tgnet.tl.TL_stars$TL_payments_getStarGifts",
+    "org.telegram.tgnet.TLRPC$TL_payments_getStarGifts",
+    "org.telegram.tgnet.tl.TL_stars$getStarGifts",
+)
+TL_PEER_USER_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_peerUser",
+    "org.telegram.tgnet.TLRPC$TL_peerUser",
+)
+
+UNIQUE_MODELS = (
+    ("Aurora", 1.4),
+    ("Ember", 2.1),
+    ("Crystal", 0.8),
+    ("Phantom", 0.5),
+    ("Lotus", 3.6),
+    ("Inferno", 1.1),
+    ("Nebula", 0.9),
+    ("Sakura", 2.4),
+    ("Obsidian", 0.6),
+    ("Ivory", 4.2),
+)
+UNIQUE_BACKDROPS = (
+    ("Midnight", 4.8),
+    ("Sunset", 3.2),
+    ("Arctic", 2.7),
+    ("Royal", 1.6),
+    ("Jade", 5.1),
+    ("Cosmic", 1.3),
+    ("Amber", 3.9),
+    ("Noir", 0.7),
+)
+UNIQUE_PATTERNS = (
+    ("Spark", 6.4),
+    ("Wave", 5.2),
+    ("Hex", 2.8),
+    ("Bloom", 3.5),
+    ("Orbit", 1.9),
+    ("Frost", 4.1),
+    ("Pulse", 2.2),
+)
 
 
 def _safe_log(message: str) -> None:
@@ -145,6 +246,36 @@ def _jlong(value: int) -> Any:
         return Long(int(value))
     except Exception:
         return int(value)
+
+
+def _jint(value: int) -> Any:
+    try:
+        from java.lang import Integer
+
+        return Integer(int(value))
+    except Exception:
+        return int(value)
+
+
+def _class_name(obj: Any) -> str:
+    if obj is None:
+        return ""
+    try:
+        return _as_str(obj.getClass().getName())
+    except Exception:
+        try:
+            return obj.__class__.__name__
+        except Exception:
+            return ""
+
+
+def _new_java_list() -> Any:
+    try:
+        from java.util import ArrayList
+
+        return ArrayList()
+    except Exception:
+        return []
 
 
 def _is_tl_user(obj: Any) -> bool:
@@ -225,6 +356,16 @@ class LocalSnosPlugin(BasePlugin):
         self._applying = False
         self._db_stack: List[List[Any]] = []
         self._menu_ids: List[Any] = []
+        self._gifts: List[Dict[str, Any]] = []
+        self._catalog: List[Any] = []
+        self._catalog_by_id: Dict[int, Any] = {}
+        self._catalog_at = 0.0
+        self._catalog_loading = False
+        self._last_gifts_self = False
+        self._last_gifts_filters: Dict[str, bool] = {}
+        self._reapply_token = 0
+        self._tl_cache: Dict[str, Any] = {}
+        self._blocking_local = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -232,19 +373,21 @@ class LocalSnosPlugin(BasePlugin):
 
     def on_plugin_load(self) -> None:
         self._reload_store()
+        self._reload_gifts()
         self._install_java_hooks()
+        self._install_gift_java_hooks()
+        self._install_request_hooks()
         self._install_menus()
         try:
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos loaded")
+        self.log("Local Snos 1.1.0 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
+        run_on_ui_thread(self._prefetch_catalog, 700)
 
     def on_plugin_unload(self) -> None:
-        # Turning the plugin off should immediately undo the visual spoof,
-        # but the saved list stays so enabling it again restores the snos.
         try:
             self._restore_all_memory(persist=False)
         except Exception:
@@ -257,6 +400,7 @@ class LocalSnosPlugin(BasePlugin):
 
     def create_settings(self) -> List[Any]:
         self._reload_store()
+        self._reload_gifts()
         rows: List[Any] = [
             Header(text="Local Snos"),
             Switch(
@@ -280,7 +424,7 @@ class LocalSnosPlugin(BasePlugin):
                 default=DEFAULT_DISPLAY_NAME,
                 subtext="Так будет называться скрытый аккаунт",
                 icon="msg_edit",
-                on_change=lambda _value: self._reapply_all(),
+                on_change=lambda _value: self._schedule_reapply(),
             ),
             Input(
                 key=FROZEN_BIO_KEY,
@@ -288,12 +432,12 @@ class LocalSnosPlugin(BasePlugin):
                 default=DEFAULT_FROZEN_BIO,
                 subtext="Подставляется в био / about",
                 icon="msg_info",
-                on_change=lambda _value: self._reapply_all(),
+                on_change=lambda _value: self._schedule_reapply(),
             ),
             Divider(text="Как пользоваться"),
             Text(
                 text="Кнопка hi в профиле",
-                subtext="Открой чужой профиль → ⋮ → hi. Повторное нажатие откатывает.",
+                subtext="Чужой профиль → ⋮ → hi. Повторное нажатие откатывает. Есть Undo.",
                 icon="msg_contacts",
             ),
             Text(
@@ -312,38 +456,37 @@ class LocalSnosPlugin(BasePlugin):
                     icon="msg_info",
                 )
             )
-            return rows
-
-        for key in self._sorted_record_keys():
-            record = self._records[key]
-            user_id = _as_int(record.get("user_id") or key)
-            original = record.get("display") or record.get("first_name") or str(user_id)
-            username = record.get("username") or ""
-            extra = f"ID {user_id}"
-            if username:
-                extra += f"  ·  @{username}"
-            extra += "  ·  нажми, чтобы вернуть"
-
+        else:
+            for key in self._sorted_record_keys():
+                record = self._records[key]
+                user_id = _as_int(record.get("user_id") or key)
+                original = record.get("display") or record.get("first_name") or str(user_id)
+                username = record.get("username") or ""
+                extra = f"ID {user_id}"
+                if username:
+                    extra += f"  ·  @{username}"
+                extra += "  ·  нажми, чтобы вернуть"
+                rows.append(
+                    Text(
+                        text=_as_str(original, str(user_id)),
+                        subtext=extra,
+                        icon="msg_delete",
+                        red=True,
+                        on_click=self._restore_click_handler(user_id),
+                    )
+                )
+            rows.append(Divider())
             rows.append(
                 Text(
-                    text=_as_str(original, str(user_id)),
-                    subtext=extra,
-                    icon="msg_delete",
+                    text="Восстановить всех",
+                    subtext=f"Вернуть {len(self._records)} аккаунт(ов) как было",
+                    icon="msg_reset",
                     red=True,
-                    on_click=self._restore_click_handler(user_id),
+                    on_click=lambda _view=None: self._confirm_restore_all(),
                 )
             )
 
-        rows.append(Divider())
-        rows.append(
-            Text(
-                text="Восстановить всех",
-                subtext=f"Вернуть {len(self._records)} аккаунт(ов) как было",
-                icon="msg_reset",
-                red=True,
-                on_click=lambda _view=None: self._confirm_restore_all(),
-            )
-        )
+        rows.extend(self._gift_settings_rows())
         return rows
 
     def _on_enabled_change(self, enabled: bool) -> None:
@@ -419,6 +562,11 @@ class LocalSnosPlugin(BasePlugin):
             menu_id = self._add_menu_safe(item)
             if menu_id is not None:
                 self._menu_ids.append(menu_id)
+        gift_item = self._build_gift_menu_item()
+        if gift_item is not None:
+            menu_id = self._add_menu_safe(gift_item)
+            if menu_id is not None:
+                self._menu_ids.append(menu_id)
 
     def _build_menu_item(self, menu_type: Any, subtext: str) -> Optional[MenuItemData]:
         kwargs_chain = [
@@ -460,6 +608,43 @@ class LocalSnosPlugin(BasePlugin):
             except Exception as exc:
                 last_error = exc
         _safe_log(f"MenuItemData incompatible: {last_error}")
+        return None
+
+    def _build_gift_menu_item(self) -> Optional[MenuItemData]:
+        kwargs_chain = [
+            dict(
+                menu_type=MenuItemType.PROFILE_ACTION_MENU,
+                text="Подарки",
+                subtext="Локальные NFT на своём профиле",
+                icon="msg_gift",
+                on_click=self._on_gifts_menu_click,
+                condition="user != null && user.self",
+                priority=90,
+            ),
+            dict(
+                menu_type=MenuItemType.PROFILE_ACTION_MENU,
+                text="Подарки",
+                subtext="Локальные NFT на своём профиле",
+                icon="msg_fave",
+                on_click=self._on_gifts_menu_click,
+                condition="user != null && user.self",
+            ),
+            dict(
+                menu_type=MenuItemType.PROFILE_ACTION_MENU,
+                text="Подарки",
+                on_click=self._on_gifts_menu_click,
+                condition="user != null && user.self",
+            ),
+        ]
+        last_error = None
+        for kwargs in kwargs_chain:
+            try:
+                return MenuItemData(**kwargs)
+            except TypeError as exc:
+                last_error = exc
+            except Exception as exc:
+                last_error = exc
+        _safe_log(f"gift MenuItemData incompatible: {last_error}")
         return None
 
     def _add_menu_safe(self, item: MenuItemData) -> Any:
@@ -795,6 +980,16 @@ class LocalSnosPlugin(BasePlugin):
                     self._mutate_user_full(user_full)
             self._notify_ui(account)
 
+    def _schedule_reapply(self) -> None:
+        self._reapply_token += 1
+        token = self._reapply_token
+
+        def _run() -> None:
+            if token == self._reapply_token:
+                self._reapply_all()
+
+        run_on_ui_thread(_run, 420)
+
     def _capture_original(self, account: int, user: Any) -> None:
         user_id = _as_int(getattr(user, "id", 0))
         key = str(user_id)
@@ -1030,8 +1225,6 @@ class LocalSnosPlugin(BasePlugin):
             before=self._before_put_users_and_chats,
             after=self._after_put_users_and_chats,
         )
-        # Actual SQLite write lives here. The public method often only
-        # posts a runnable, so hooking just putUsersAndChats is not enough.
         self._hook_all(
             "org.telegram.messenger.MessagesStorage",
             "putUsersAndChatsInternal",
@@ -1215,6 +1408,859 @@ class LocalSnosPlugin(BasePlugin):
     def _original_display(self, user_id: int) -> str:
         record = self._records.get(str(user_id), {})
         return _as_str(record.get("display") or record.get("first_name") or "")
+
+    # ------------------------------------------------------------------
+    # Local gifts — store / settings / UI
+    # ------------------------------------------------------------------
+
+    def _gifts_enabled(self) -> bool:
+        return bool(self.get_setting(GIFTS_ENABLED_KEY, True))
+
+    def _reload_gifts(self) -> None:
+        raw = self.get_setting(GIFTS_STORE_KEY, "[]")
+        data: List[Any] = []
+        if isinstance(raw, list):
+            data = raw
+        elif isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    data = parsed
+            except Exception:
+                _safe_log(f"bad gifts store, resetting:\n{_format_exc()}")
+                data = []
+        cleaned: List[Dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            rec = dict(item)
+            rec["id"] = _as_str(rec.get("id") or self._new_gift_id())
+            rec["msg_id"] = _as_int(rec.get("msg_id"))
+            rec["saved_id"] = _as_int(rec.get("saved_id"))
+            rec["gift_id"] = _as_int(rec.get("gift_id"))
+            rec["upgraded"] = bool(rec.get("upgraded"))
+            if not rec["msg_id"] or not (LOCAL_MSG_MIN <= rec["msg_id"] <= LOCAL_MSG_MAX):
+                rec["msg_id"] = self._next_msg_id(cleaned)
+            if rec["saved_id"] >= 0 or rec["saved_id"] > LOCAL_SAVED_BASE:
+                rec["saved_id"] = LOCAL_SAVED_BASE - (len(cleaned) + 1)
+            if not rec.get("slug"):
+                rec["slug"] = LOCAL_SLUG_PREFIX + rec["id"]
+            cleaned.append(rec)
+        self._gifts = cleaned
+
+    def _persist_gifts(self, reload_settings: bool = False) -> None:
+        try:
+            payload = json.dumps(self._gifts, ensure_ascii=False)
+            self.set_setting(GIFTS_STORE_KEY, payload, reload_settings=reload_settings)
+        except TypeError:
+            try:
+                self.set_setting(GIFTS_STORE_KEY, json.dumps(self._gifts, ensure_ascii=False))
+            except Exception:
+                _safe_log(f"persist gifts failed:\n{_format_exc()}")
+        except Exception:
+            _safe_log(f"persist gifts failed:\n{_format_exc()}")
+
+    def _new_gift_id(self) -> str:
+        return f"g{int(time.time() * 1000) % 1000000000}{random.randint(10, 99)}"
+
+    def _next_msg_id(self, existing: Optional[List[Dict[str, Any]]] = None) -> int:
+        used = {_as_int(item.get("msg_id")) for item in (existing if existing is not None else self._gifts)}
+        value = LOCAL_MSG_MIN + 1
+        while value in used and value <= LOCAL_MSG_MAX:
+            value += 1
+        return value
+
+    def _gift_by_id(self, gift_id: str) -> Optional[Dict[str, Any]]:
+        for rec in self._gifts:
+            if rec.get("id") == gift_id:
+                return rec
+        return None
+
+    def _gift_settings_rows(self) -> List[Any]:
+        rows: List[Any] = [
+            Divider(text="Локальные подарки"),
+            Switch(
+                key=GIFTS_ENABLED_KEY,
+                text="Показывать на своём профиле",
+                default=True,
+                subtext="Только у тебя. Настоящие подарки плагин не трогает",
+                icon="msg_gift",
+            ),
+            Text(
+                text="Добавить подарок",
+                subtext="Выбери из каталога Telegram — появится у тебя в профиле",
+                icon="msg_add",
+                on_click=lambda _view=None: self._start_add_gift(),
+            ),
+            Text(
+                text="Безопасность",
+                subtext="Локальные подарки нельзя продать, передать или улучшить за Stars. Реальные подарки не затрагиваются.",
+                icon="msg_info",
+            ),
+        ]
+        if not self._gifts:
+            rows.append(
+                Text(
+                    text="Пока нет локальных подарков",
+                    subtext="Свой профиль → ⋮ → Подарки  или кнопка выше",
+                    icon="msg_info",
+                )
+            )
+            return rows
+
+        for rec in reversed(self._gifts):
+            rows.append(
+                Text(
+                    text=self._gift_title(rec),
+                    subtext=self._gift_subtitle(rec),
+                    icon="msg_fave",
+                    on_click=self._gift_click_handler(str(rec.get("id"))),
+                )
+            )
+        rows.append(
+            Text(
+                text="Удалить все локальные",
+                subtext=f"Убрать {len(self._gifts)} подарок(ов) только из этого клиента",
+                icon="msg_delete",
+                red=True,
+                on_click=lambda _view=None: self._confirm_clear_gifts(),
+            )
+        )
+        return rows
+
+    def _gift_title(self, rec: Dict[str, Any]) -> str:
+        emoji = _as_str(rec.get("emoji") or "").strip()
+        name = _as_str(rec.get("title") or "Подарок").strip() or "Подарок"
+        return f"{emoji} {name}".strip()
+
+    def _gift_subtitle(self, rec: Dict[str, Any]) -> str:
+        if rec.get("upgraded"):
+            unique = rec.get("unique") or {}
+            num = _as_int(unique.get("num"))
+            model = _as_str(unique.get("model") or "—")
+            return f"Коллекционный #{num}  ·  {model}  ·  нажми, чтобы открыть"
+        return "Обычный  ·  можно улучшить локально  ·  нажми"
+
+    def _gift_click_handler(self, gift_id: str) -> Callable[..., None]:
+        def _on_click(_view: Any = None) -> None:
+            rec = self._gift_by_id(gift_id)
+            if rec is None:
+                self._toast_info("Подарок уже удалён")
+                return
+            self._open_local_gift_dialog(rec)
+
+        return _on_click
+
+    def _on_gifts_menu_click(self, context: Dict[str, Any]) -> None:
+        try:
+            user = context.get("user")
+            account = _as_int(context.get("account"), self._selected_account())
+            user_id = _as_int(getattr(user, "id", 0) if user is not None else 0)
+            if user_id and not self._is_me(account, user_id) and not getattr(user, "self", False):
+                self._toast_info("Локальные подарки добавляются только на свой профиль")
+                return
+            self._open_gifts_manager()
+        except Exception:
+            _safe_log(f"gifts menu failed:\n{_format_exc()}")
+            self._toast_error("Не удалось открыть подарки")
+
+    def _open_gifts_manager(self) -> None:
+        self._reload_gifts()
+        items = ["Добавить подарок из каталога"]
+        ids: List[Optional[str]] = [None]
+        for rec in reversed(self._gifts):
+            mark = "★ " if rec.get("upgraded") else ""
+            items.append(f"{mark}{self._gift_title(rec)}")
+            ids.append(str(rec.get("id")))
+        if not self._gifts:
+            items.append("Пока пусто — сначала добавь подарок")
+            ids.append("__empty__")
+
+        def _picked(builder: Any, which: int) -> None:
+            try:
+                builder.dismiss()
+            except Exception:
+                pass
+            if which < 0 or which >= len(ids):
+                return
+            chosen = ids[which]
+            if chosen is None:
+                self._start_add_gift()
+                return
+            if chosen == "__empty__":
+                return
+            rec = self._gift_by_id(chosen)
+            if rec is not None:
+                self._open_local_gift_dialog(rec)
+
+        self._show_items("Локальные подарки", items, _picked)
+
+    def _start_add_gift(self) -> None:
+        if not self._gifts_enabled():
+            self._toast_error("Локальные подарки выключены в настройках")
+            return
+        spinner = self._show_spinner("Каталог подарков", "Загружаю доступные подарки…")
+        account = self._selected_account()
+
+        def _after(ok: bool, error: Optional[str]) -> None:
+            self._dismiss_quiet(spinner)
+            if not ok:
+                self._toast_error(error or "Не удалось загрузить каталог")
+                return
+            self._show_catalog_picker()
+
+        self._ensure_catalog(account, _after)
+
+    def _show_catalog_picker(self) -> None:
+        if not self._catalog:
+            self._toast_error("Каталог пуст")
+            return
+        labels: List[str] = []
+        gifts: List[Any] = []
+        for gift in self._catalog:
+            if self._gift_is_unique_obj(gift):
+                continue
+            label = self._catalog_label(gift)
+            if not label:
+                continue
+            labels.append(label)
+            gifts.append(gift)
+            if len(labels) >= 80:
+                break
+        if not labels:
+            self._toast_error("В каталоге нет обычных подарков")
+            return
+
+        def _picked(builder: Any, which: int) -> None:
+            try:
+                builder.dismiss()
+            except Exception:
+                pass
+            if 0 <= which < len(gifts):
+                self._add_local_gift(gifts[which])
+
+        self._show_items("Выбери подарок", labels, _picked)
+
+    def _catalog_label(self, gift: Any) -> str:
+        emoji = self._sticker_emoji(getattr(gift, "sticker", None))
+        title = _as_str(getattr(gift, "title", "") or "").strip()
+        if not title:
+            title = "Подарок"
+        stars = _as_int(getattr(gift, "stars", 0))
+        extra = f"  ·  {stars} ★" if stars else ""
+        return f"{emoji} {title}{extra}".strip()
+
+    def _sticker_emoji(self, sticker: Any) -> str:
+        if sticker is None:
+            return "🎁"
+        for name in ("alt", "emoticon", "emoji"):
+            value = _as_str(getattr(sticker, name, "") or "").strip()
+            if value:
+                return value
+        return "🎁"
+
+    def _add_local_gift(self, catalog_gift: Any) -> None:
+        gift_id = _as_int(getattr(catalog_gift, "id", 0))
+        if gift_id <= 0:
+            self._toast_error("У подарка нет id")
+            return
+        rec = {
+            "id": self._new_gift_id(),
+            "gift_id": gift_id,
+            "msg_id": self._next_msg_id(),
+            "saved_id": LOCAL_SAVED_BASE - (len(self._gifts) + 1),
+            "title": _as_str(getattr(catalog_gift, "title", "") or "").strip() or "Подарок",
+            "emoji": self._sticker_emoji(getattr(catalog_gift, "sticker", None)),
+            "stars": _as_int(getattr(catalog_gift, "stars", 0)),
+            "limited": bool(getattr(catalog_gift, "limited", False)),
+            "upgraded": False,
+            "unique": {},
+            "added_at": int(time.time()),
+        }
+        rec["slug"] = LOCAL_SLUG_PREFIX + rec["id"]
+        self._gifts.append(rec)
+        self._persist_gifts(reload_settings=True)
+        self._toast_success(f"{self._gift_title(rec)} добавлен. Открой свой профиль → Подарки")
+
+    def _open_local_gift_dialog(self, rec: Dict[str, Any]) -> None:
+        unique = rec.get("unique") or {}
+        if rec.get("upgraded"):
+            body = (
+                f"{self._gift_title(rec)}\n\n"
+                f"Коллекционный подарок #{_as_int(unique.get('num'))}\n"
+                f"Модель: {unique.get('model') or '—'}  ({unique.get('model_rarity') or '—'}%)\n"
+                f"Фон: {unique.get('backdrop') or '—'}  ({unique.get('backdrop_rarity') or '—'}%)\n"
+                f"Узор: {unique.get('pattern') or '—'}  ({unique.get('pattern_rarity') or '—'}%)\n\n"
+                "Только локально. Продажа, перевод и вывод в блокчейн отключены."
+            )
+            self._show_confirm(
+                "Локальный NFT",
+                body,
+                "Удалить",
+                lambda b, _w: self._delete_local_gift(str(rec.get("id")), b),
+            )
+            return
+
+        body = (
+            f"{self._gift_title(rec)}\n\n"
+            "Обычный подарок — можно улучшить до коллекционного.\n"
+            "Улучшение бесплатное и только в этом клиенте.\n"
+            "Настоящие подарки и Stars не затрагиваются."
+        )
+
+        def _upgrade(builder: Any, _which: Any = None) -> None:
+            self._dismiss_quiet(builder)
+            self._upgrade_local_gift(str(rec.get("id")))
+
+        activity = self._activity()
+        if activity is None:
+            _upgrade(None)
+            return
+        try:
+            builder = AlertDialogBuilder(activity)
+            builder.set_title("Локальный подарок")
+            builder.set_message(body)
+            builder.set_positive_button("Улучшить", _upgrade)
+            builder.set_neutral_button(
+                "Удалить",
+                lambda b, _w: self._delete_local_gift(str(rec.get("id")), b),
+            )
+            builder.set_negative_button("Закрыть", lambda b, _w: b.dismiss())
+            try:
+                builder.make_button_red(AlertDialogBuilder.BUTTON_NEUTRAL)
+            except Exception:
+                pass
+            builder.show()
+        except Exception:
+            _safe_log(f"gift dialog failed:\n{_format_exc()}")
+            self._upgrade_local_gift(str(rec.get("id")))
+
+    def _delete_local_gift(self, gift_id: str, builder: Any = None) -> None:
+        self._dismiss_quiet(builder)
+        before = len(self._gifts)
+        self._gifts = [rec for rec in self._gifts if rec.get("id") != gift_id]
+        if len(self._gifts) == before:
+            self._toast_info("Подарок уже удалён")
+            return
+        self._persist_gifts(reload_settings=True)
+        self._toast_success("Локальный подарок удалён")
+
+    def _confirm_clear_gifts(self) -> None:
+        if not self._gifts:
+            self._toast_info("Удалять нечего")
+            return
+
+        def _ok(builder: Any = None, _which: Any = None) -> None:
+            self._gifts = []
+            self._persist_gifts(reload_settings=True)
+            self._dismiss_quiet(builder)
+            self._toast_success("Локальные подарки удалены")
+
+        self._show_confirm(
+            "Удалить все локальные?",
+            "Настоящие подарки останутся как были.",
+            "Удалить",
+            _ok,
+        )
+
+    def _upgrade_local_gift(self, gift_id: str) -> None:
+        rec = self._gift_by_id(gift_id)
+        if rec is None:
+            self._toast_error("Подарок не найден")
+            return
+        if rec.get("upgraded"):
+            self._toast_info("Этот подарок уже коллекционный")
+            return
+        unique = self._roll_unique(rec)
+        rec["unique"] = unique
+        rec["upgraded"] = True
+        rec["upgraded_at"] = int(time.time())
+        self._persist_gifts()
+        self._play_upgrade_animation(rec, unique)
+
+    def _roll_unique(self, rec: Dict[str, Any]) -> Dict[str, Any]:
+        seed = _as_str(rec.get("id")) + str(rec.get("gift_id"))
+        rng = random.Random(seed)
+        model, model_r = rng.choice(UNIQUE_MODELS)
+        backdrop, back_r = rng.choice(UNIQUE_BACKDROPS)
+        pattern, pat_r = rng.choice(UNIQUE_PATTERNS)
+        num = rng.randint(17, 49999)
+        return {
+            "title": rec.get("title") or "Collectible",
+            "slug": rec.get("slug") or (LOCAL_SLUG_PREFIX + rec["id"]),
+            "num": num,
+            "model": model,
+            "model_rarity": model_r,
+            "backdrop": backdrop,
+            "backdrop_rarity": back_r,
+            "pattern": pattern,
+            "pattern_rarity": pat_r,
+            "issued": max(num, 1000),
+            "total": 50000,
+        }
+
+    def _play_upgrade_animation(self, rec: Dict[str, Any], unique: Dict[str, Any]) -> None:
+        spinner = self._show_spinner("Улучшение подарка", "Собираем уникальные атрибуты…")
+        steps = [
+            (550, "Подбираем модель…"),
+            (1200, f"Модель: {unique.get('model')}  ({unique.get('model_rarity')}%)"),
+            (1850, f"Фон: {unique.get('backdrop')}  ({unique.get('backdrop_rarity')}%)"),
+            (2500, f"Узор: {unique.get('pattern')}  ({unique.get('pattern_rarity')}%)"),
+        ]
+
+        def _set_msg(text: str) -> None:
+            try:
+                if spinner is not None:
+                    spinner.set_message(text)
+            except Exception:
+                pass
+
+        for delay, text in steps:
+            run_on_ui_thread(lambda t=text: _set_msg(t), delay)
+
+        def _done() -> None:
+            self._dismiss_quiet(spinner)
+            title = self._gift_title(rec)
+            num = _as_int(unique.get("num"))
+            self._toast_success(f"{title} стал коллекционным #{num}")
+
+        run_on_ui_thread(_done, 3200)
+
+    # ------------------------------------------------------------------
+    # Local gifts — catalog / TL inject / safety
+    # ------------------------------------------------------------------
+
+    def _prefetch_catalog(self) -> None:
+        if not self._gifts_enabled():
+            return
+        self._ensure_catalog(self._selected_account(), lambda _ok, _err: None)
+
+    def _ensure_catalog(self, account: int, callback: Callable[[bool, Optional[str]], None]) -> None:
+        if self._catalog and (time.time() - self._catalog_at) < 600:
+            callback(True, None)
+            return
+        if self._catalog_loading:
+            run_on_ui_thread(lambda: self._ensure_catalog(account, callback), 400)
+            return
+        req = self._new_tl(TL_GET_GIFTS_NAMES)
+        if req is None and TLRPC is not None:
+            for name in ("TL_payments_getStarGifts", "TL_starGiftsGetStarGifts"):
+                ctor = getattr(TLRPC, name, None)
+                if callable(ctor):
+                    try:
+                        req = ctor()
+                        break
+                    except Exception:
+                        continue
+        if req is None:
+            callback(False, "В этой сборке нет запроса каталога подарков")
+            return
+        try:
+            if hasattr(req, "hash"):
+                req.hash = 0
+        except Exception:
+            pass
+        self._catalog_loading = True
+
+        def _done(response: Any, error: Any) -> None:
+            self._catalog_loading = False
+
+            def _ui() -> None:
+                if error is not None:
+                    callback(False, _as_str(getattr(error, "text", None) or "Каталог недоступен"))
+                    return
+                gifts = _java_list(getattr(response, "gifts", None))
+                if not gifts:
+                    callback(False, "Каталог пуст")
+                    return
+                self._catalog = gifts
+                mapping: Dict[int, Any] = {}
+                for gift in gifts:
+                    gid = _as_int(getattr(gift, "id", 0))
+                    if gid:
+                        mapping[gid] = gift
+                self._catalog_by_id = mapping
+                self._catalog_at = time.time()
+                callback(True, None)
+
+            run_on_ui_thread(_ui)
+
+        self._send_req(req, _done, account)
+
+    def _install_request_hooks(self) -> None:
+        names = list(GIFT_MUTATION_HINTS) + list(PAYMENT_HINTS) + list(LIST_HINTS)
+        names.append("getStarGifts")
+        for name in names:
+            self._add_req_hook(name)
+
+    def _add_req_hook(self, name: str) -> None:
+        try:
+            self.add_hook(name, match_substring=True)
+            return
+        except TypeError:
+            pass
+        except Exception:
+            _safe_log(f"add_hook({name}) failed:\n{_format_exc()}")
+            return
+        try:
+            self.add_hook(name)
+        except Exception:
+            _safe_log(f"add_hook retry {name} failed:\n{_format_exc()}")
+
+    def pre_request_hook(self, request_name: str, account: int, request: Any) -> HookResult:
+        try:
+            if "getSavedStarGifts" in _as_str(request_name):
+                self._last_gifts_self = self._request_is_self_gifts(account, request)
+                self._last_gifts_filters = {
+                    "exclude_unique": bool(getattr(request, "exclude_unique", False)),
+                    "exclude_upgradable": bool(getattr(request, "exclude_upgradable", False)),
+                    "exclude_unupgradable": bool(getattr(request, "exclude_unupgradable", False)),
+                    "exclude_unlimited": bool(getattr(request, "exclude_unlimited", False)),
+                }
+                return HookResult()
+            if self._name_has(request_name, GIFT_MUTATION_HINTS) or self._name_has(request_name, PAYMENT_HINTS):
+                rec = self._local_record_from_obj(request)
+                if rec is None:
+                    return HookResult()
+                self._on_blocked_local_request(request_name, rec)
+                return HookResult(strategy=HookStrategy.CANCEL)
+        except Exception:
+            _safe_log(f"pre_request failed:\n{_format_exc()}")
+        return HookResult()
+
+    def post_request_hook(self, request_name: str, account: int, response: Any, error: Any) -> HookResult:
+        try:
+            if error or response is None:
+                return HookResult()
+            if "getStarGifts" in _as_str(request_name) and "Saved" not in _as_str(request_name):
+                gifts = _java_list(getattr(response, "gifts", None))
+                if gifts:
+                    self._catalog = gifts
+                    mapping: Dict[int, Any] = {}
+                    for gift in gifts:
+                        gid = _as_int(getattr(gift, "id", 0))
+                        if gid:
+                            mapping[gid] = gift
+                    self._catalog_by_id = mapping
+                    self._catalog_at = time.time()
+                return HookResult()
+            if not self._gifts_enabled() or not self._gifts:
+                return HookResult()
+            if "getSavedStarGifts" not in _as_str(request_name):
+                return HookResult()
+            if not self._last_gifts_self:
+                return HookResult()
+            if self._inject_local_gifts(response):
+                return HookResult(strategy=HookStrategy.MODIFY, response=response)
+        except Exception:
+            _safe_log(f"post_request failed:\n{_format_exc()}")
+        return HookResult()
+
+    def _name_has(self, request_name: str, hints: Any) -> bool:
+        name = _as_str(request_name)
+        return any(hint in name for hint in hints)
+
+    def _request_is_self_gifts(self, account: int, request: Any) -> bool:
+        if request is None:
+            return False
+        if bool(getattr(request, "collection_id", 0)):
+            return False
+        offset = _as_str(getattr(request, "offset", "") or "")
+        if offset and offset not in ("", "0"):
+            return False
+        peer = getattr(request, "peer", None)
+        if peer is None:
+            return False
+        name = _class_name(peer).lower()
+        if "self" in name:
+            return True
+        user_id = _as_int(getattr(peer, "user_id", 0))
+        if user_id and self._is_me(account, user_id):
+            return True
+        return False
+
+    def _inject_local_gifts(self, response: Any) -> bool:
+        built: List[Any] = []
+        for rec in reversed(self._gifts):
+            obj = self._build_saved_gift(rec)
+            if obj is not None:
+                built.append(obj)
+        if not built:
+            return False
+        current = _java_list(getattr(response, "gifts", None))
+        merged = _new_java_list()
+        try:
+            for item in built:
+                merged.add(item)
+            for item in current:
+                if self._local_record_from_obj(item) is not None:
+                    continue
+                merged.add(item)
+            self._set_field(response, "gifts", merged)
+        except Exception:
+            _safe_log(f"inject list failed:\n{_format_exc()}")
+            return False
+        count = _as_int(getattr(response, "count", len(current)))
+        extra = len(built)
+        self._set_field(response, "count", max(count, len(current)) + extra)
+        return True
+
+    def _build_saved_gift(self, rec: Dict[str, Any]) -> Any:
+        saved = self._new_tl(TL_SAVED_NAMES)
+        if saved is None:
+            return None
+        catalog = self._catalog_by_id.get(_as_int(rec.get("gift_id")))
+        gift_obj = catalog
+        if rec.get("upgraded"):
+            unique_obj = self._build_unique_gift(rec, catalog)
+            if unique_obj is not None:
+                gift_obj = unique_obj
+        if gift_obj is None:
+            return None
+
+        flags = SAVED_FLAG_FROM_ID | SAVED_FLAG_MSG_ID | SAVED_FLAG_SAVED_ID | SAVED_FLAG_PINNED
+        if not rec.get("upgraded"):
+            flags |= SAVED_FLAG_CAN_UPGRADE
+            self._set_field(saved, "can_upgrade", True)
+        else:
+            self._set_field(saved, "can_upgrade", False)
+
+        self._set_field(saved, "flags", flags)
+        self._set_field(saved, "unsaved", False)
+        self._set_field(saved, "pinned_to_top", True)
+        self._set_field(saved, "name_hidden", False)
+        self._set_field(saved, "date", _as_int(rec.get("added_at"), int(time.time())))
+        self._set_field(saved, "msg_id", _as_int(rec.get("msg_id")))
+        self._set_field(saved, "saved_id", _as_int(rec.get("saved_id")))
+        self._set_field(saved, "gift", gift_obj)
+        peer = self._self_peer()
+        if peer is not None:
+            self._set_field(saved, "from_id", peer)
+        return saved
+
+    def _build_unique_gift(self, rec: Dict[str, Any], catalog: Any) -> Any:
+        unique = self._new_tl(TL_UNIQUE_NAMES)
+        if unique is None:
+            return catalog
+        meta = rec.get("unique") or {}
+        self._set_field(unique, "id", _as_int(rec.get("saved_id")) * -1)
+        self._set_field(unique, "gift_id", _as_int(rec.get("gift_id")))
+        self._set_field(unique, "title", _as_str(meta.get("title") or rec.get("title") or "Collectible"))
+        self._set_field(unique, "slug", _as_str(meta.get("slug") or rec.get("slug")))
+        self._set_field(unique, "num", _as_int(meta.get("num"), 1))
+        self._set_field(unique, "availability_issued", _as_int(meta.get("issued"), 1))
+        self._set_field(unique, "availability_total", _as_int(meta.get("total"), 50000))
+        peer = self._self_peer()
+        if peer is not None:
+            self._set_field(unique, "owner_id", peer)
+            flags = _as_int(getattr(unique, "flags", 0))
+            flags |= 1
+            self._set_field(unique, "flags", flags)
+        attrs = _new_java_list()
+        try:
+            self._set_field(unique, "attributes", attrs)
+        except Exception:
+            pass
+        return unique
+
+    def _self_peer(self) -> Any:
+        account = self._selected_account()
+        user_id = 0
+        try:
+            cfg = self._user_config(account)
+            me = cfg.getCurrentUser() if cfg is not None else None
+            user_id = _as_int(getattr(me, "id", 0))
+        except Exception:
+            user_id = 0
+        if user_id <= 0:
+            return None
+        peer = self._new_tl(("org.telegram.tgnet.TLRPC$TL_peerUser",))
+        if peer is None and TLRPC is not None:
+            ctor = getattr(TLRPC, "TL_peerUser", None)
+            if callable(ctor):
+                try:
+                    peer = ctor()
+                except Exception:
+                    peer = None
+        if peer is None:
+            return None
+        self._set_field(peer, "user_id", user_id)
+        return peer
+
+    def _local_record_from_obj(self, obj: Any) -> Optional[Dict[str, Any]]:
+        if obj is None or not self._gifts:
+            return None
+        seen: Set[int] = set()
+        stack = [obj]
+        depth = 0
+        while stack and depth < 24:
+            current = stack.pop()
+            depth += 1
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            rec = self._match_local_gift(current)
+            if rec is not None:
+                return rec
+            for name in (
+                "stargift",
+                "starGift",
+                "gift",
+                "invoice",
+                "saved_gift",
+                "savedGift",
+                "inputInvoice",
+            ):
+                child = getattr(current, name, None)
+                if child is not None and not isinstance(child, (str, int, float, bool)):
+                    stack.append(child)
+        return None
+
+    def _match_local_gift(self, obj: Any) -> Optional[Dict[str, Any]]:
+        msg_id = _as_int(getattr(obj, "msg_id", 0))
+        saved_id = _as_int(getattr(obj, "saved_id", 0))
+        slug = _as_str(getattr(obj, "slug", "") or "")
+        for rec in self._gifts:
+            if msg_id and msg_id == _as_int(rec.get("msg_id")):
+                return rec
+            if saved_id and saved_id == _as_int(rec.get("saved_id")):
+                return rec
+            rec_slug = _as_str(rec.get("slug") or "")
+            if slug and rec_slug and slug == rec_slug:
+                return rec
+            unique = rec.get("unique") or {}
+            if slug and slug == _as_str(unique.get("slug") or ""):
+                return rec
+        if slug.startswith(LOCAL_SLUG_PREFIX):
+            return {"id": slug, "slug": slug}
+        return None
+
+    def _on_blocked_local_request(self, request_name: str, rec: Dict[str, Any]) -> None:
+        if self._blocking_local:
+            return
+        self._blocking_local = True
+
+        def _ui() -> None:
+            self._blocking_local = False
+            name = _as_str(request_name)
+            if "upgrade" in name.lower():
+                gift_id = _as_str(rec.get("id") or "")
+                live = self._gift_by_id(gift_id)
+                if live is not None and not live.get("upgraded"):
+                    self._upgrade_local_gift(gift_id)
+                    return
+                self._toast_info("Локальный подарок уже коллекционный")
+                return
+            self._toast_error("Локальный подарок нельзя продать, передать или вывести")
+
+        run_on_ui_thread(_ui)
+
+    def _install_gift_java_hooks(self) -> None:
+        for class_name in GIFT_SHEET_CLASSES:
+            self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
+            self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
+
+    def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
+        cls = find_class(class_name)
+        if cls is None:
+            return
+        hook = _CallbackHook(after=after)
+        for method_name in ("hook_all_constructors", "hookAllConstructors"):
+            method = getattr(self, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method(cls, hook)
+                self.log(f"hooked ctors {class_name}")
+                return
+            except Exception:
+                _safe_log(f"{method_name} {class_name} failed:\n{_format_exc()}")
+
+    def _after_gift_sheet_ctor(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._local_from_sheet(sheet, getattr(param, "args", None))
+        if rec is None:
+            return
+        try:
+            setattr(sheet, "_local_snos_gift", rec.get("id"))
+        except Exception:
+            pass
+
+    def _before_gift_sheet_show(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._local_from_sheet(sheet, None)
+        if rec is None:
+            marker = getattr(sheet, "_local_snos_gift", None) if sheet is not None else None
+            if marker:
+                rec = self._gift_by_id(_as_str(marker))
+        if rec is None:
+            return
+        try:
+            param.setResult(None)
+        except Exception:
+            pass
+        live = dict(rec)
+        run_on_ui_thread(lambda: self._open_local_gift_dialog(live), 60)
+        try:
+            dismiss = getattr(sheet, "dismiss", None)
+            if callable(dismiss):
+                run_on_ui_thread(dismiss, 10)
+        except Exception:
+            pass
+
+    def _local_from_sheet(self, sheet: Any, args: Any) -> Optional[Dict[str, Any]]:
+        if sheet is not None:
+            rec = self._local_record_from_obj(sheet)
+            if rec is not None:
+                return rec
+            for name in ("savedGift", "gift", "slug", "messageId", "saved_id", "msg_id"):
+                try:
+                    value = get_private_field(sheet, name)
+                except Exception:
+                    value = getattr(sheet, name, None)
+                rec = self._local_record_from_obj(value) if value is not None else None
+                if rec is None and value is not None and not isinstance(value, (str, int, float)):
+                    rec = self._match_local_gift(value)
+                if rec is None and isinstance(value, (int, float)):
+                    rec = self._match_local_gift(type("T", (), {"msg_id": int(value), "saved_id": int(value)})())
+                if rec is None and isinstance(value, str):
+                    rec = self._match_local_gift(type("T", (), {"slug": value})())
+                if rec is not None:
+                    return rec
+        for arg in list(args or []):
+            rec = self._local_record_from_obj(arg)
+            if rec is not None:
+                return rec
+            if arg is not None:
+                rec = self._match_local_gift(arg)
+                if rec is not None:
+                    return rec
+        return None
+
+    def _gift_is_unique_obj(self, gift: Any) -> bool:
+        name = _class_name(gift).lower()
+        if "unique" in name:
+            return True
+        return hasattr(gift, "slug") and hasattr(gift, "num") and hasattr(gift, "attributes")
+
+    def _new_tl(self, names: Any) -> Any:
+        for name in names:
+            if name in self._tl_cache:
+                cls = self._tl_cache[name]
+            else:
+                cls = find_class(name)
+                self._tl_cache[name] = cls
+            if cls is None:
+                continue
+            try:
+                return cls()
+            except Exception:
+                try:
+                    return cls.newInstance()
+                except Exception:
+                    continue
+        return None
 
     # ------------------------------------------------------------------
     # Telegram helpers
@@ -1495,7 +2541,7 @@ class LocalSnosPlugin(BasePlugin):
             except Exception:
                 _safe_log(f"fragment refresh failed:\n{_format_exc()}")
 
-        run_on_ui_thread(_do)
+        run_on_ui_thread(_do, 120)
 
     def _post_notifications(self, account: int, user_id: Optional[int]) -> None:
         nc = self._notification_center(account)
@@ -1573,6 +2619,57 @@ class LocalSnosPlugin(BasePlugin):
     # UI helpers
     # ------------------------------------------------------------------
 
+    def _activity(self) -> Any:
+        fragment = get_last_fragment() if get_last_fragment else None
+        if fragment is None:
+            return None
+        try:
+            return fragment.getParentActivity()
+        except Exception:
+            return None
+
+    def _dismiss_quiet(self, builder: Any) -> None:
+        if builder is None:
+            return
+        try:
+            builder.dismiss()
+        except Exception:
+            pass
+
+    def _show_spinner(self, title: str, message: str) -> Any:
+        activity = self._activity()
+        if activity is None:
+            return None
+        try:
+            style = getattr(AlertDialogBuilder, "ALERT_TYPE_SPINNER", 2)
+            builder = AlertDialogBuilder(activity, style)
+            builder.set_title(title)
+            builder.set_message(message)
+            builder.show()
+            try:
+                builder.set_cancelable(False)
+            except Exception:
+                pass
+            return builder
+        except Exception:
+            _safe_log(f"spinner failed:\n{_format_exc()}")
+            return None
+
+    def _show_items(self, title: str, items: List[str], on_pick: Callable[..., None]) -> None:
+        activity = self._activity()
+        if activity is None:
+            self._toast_error("Нет активного окна")
+            return
+        try:
+            builder = AlertDialogBuilder(activity)
+            builder.set_title(title)
+            builder.set_items(items, on_pick)
+            builder.set_negative_button("Отмена", lambda b, _w: b.dismiss())
+            builder.show()
+        except Exception:
+            _safe_log(f"items dialog failed:\n{_format_exc()}")
+            self._toast_error("Не удалось открыть список")
+
     def _show_confirm(
         self,
         title: str,
@@ -1580,13 +2677,7 @@ class LocalSnosPlugin(BasePlugin):
         ok_text: str,
         on_ok: Callable[..., None],
     ) -> None:
-        fragment = get_last_fragment() if get_last_fragment else None
-        activity = None
-        if fragment is not None:
-            try:
-                activity = fragment.getParentActivity()
-            except Exception:
-                activity = None
+        activity = self._activity()
         if activity is None:
             on_ok(None, None)
             return
