@@ -13,20 +13,23 @@
 
 ## Установка
 
-1. Клиент **exteraGram 11+** / **AyuGram** с включённым движком плагинов.
-2. `Настройки → exteraGram / Plugins → включить Plugins`.
-3. Скопируй файл `local_snos.py` в папку плагинов, либо импортируй его через меню плагинов.
+Нужен **exteraGram 11+** / **AyuGram** с включёнными плагинами:
+`Настройки → exteraGram / Plugins`.
 
-Типичные пути на устройстве:
+### Через файл `.plugin` (проще всего)
+
+1. Скачай [local_snos.plugin](https://github.com/syslikoffnet/extragramplugin/releases/latest/download/local_snos.plugin).
+2. Отправь файл себе в **Избранное**.
+3. Нажми на файл → **Установить плагин** → включи его.
+
+### Вручную
+
+Скопируй `local_snos.py` или `local_snos.plugin` в папку плагинов:
 
 ```
 /data/user/0/com.exteragram.messenger/files/plugins/local_snos.py
 /data/user/0/com.radolyn.ayugram/files/plugins/local_snos.py
 ```
-
-4. Включи плагин **Local Snos**.
-
-Имя файла должно остаться `local_snos.py` — так проще для загрузчика (`__id__` = `local_snos`).
 
 ## Как пользоваться
 
