@@ -65,7 +65,7 @@ __description__ = (
     "в био — «Аккаунт заморожен». Откат в настройках плагина или через `.unsnos`."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -1499,42 +1499,32 @@ class LocalSnosPlugin(BasePlugin):
 
     def _post_notifications(self, account: int, user_id: Optional[int]) -> None:
         nc = self._notification_center(account)
-        if nc is None:
+        if nc is None or NotificationCenter is None:
             return
+
         mask = UPDATE_MASK_FALLBACK
-        if NotificationCenter is not None:
-            value = 0
-            for name in (
-                "UPDATE_MASK_NAME",
-                "UPDATE_MASK_AVATAR",
-                "UPDATE_MASK_STATUS",
-                "UPDATE_MASK_PHONE",
-                "UPDATE_MASK_USER_PHONE",
-            ):
-                part = getattr(NotificationCenter, name, None)
-                if isinstance(part, int):
-                    value |= part
-            if value:
-                mask = value
+        value = 0
+        for name in (
+            "UPDATE_MASK_NAME",
+            "UPDATE_MASK_AVATAR",
+            "UPDATE_MASK_STATUS",
+            "UPDATE_MASK_PHONE",
+            "UPDATE_MASK_USER_PHONE",
+        ):
+            part = getattr(NotificationCenter, name, None)
+            if isinstance(part, int):
+                value |= part
+        if value:
+            mask = value
 
-        events: List[Any] = []
-        if NotificationCenter is not None:
-            events.append((getattr(NotificationCenter, "updateInterfaces", None), [mask]))
-            events.append((getattr(NotificationCenter, "dialogsNeedReload", None), []))
-            events.append((getattr(NotificationCenter, "contactsDidLoad", None), []))
-            events.append((getattr(NotificationCenter, "reloadInterface", None), []))
-            if user_id:
-                events.append(
-                    (
-                        getattr(NotificationCenter, "userInfoDidLoad", None),
-                        [_jlong(user_id), None],
-                    )
-                )
+        event_id = getattr(NotificationCenter, "updateInterfaces", None)
+        if event_id is None:
+            return
 
-        for event_id, args in events:
-            if event_id is None:
-                continue
-            self._post_event(nc, event_id, args)
+        # Must be java.lang.Integer. A Python int becomes Long and
+        # DialogsActivity.didReceivedNotification crashes with
+        # ClassCastException: Long cannot be cast to Integer.
+        self._post_event(nc, event_id, [_jint(mask)])
 
     def _post_event(self, nc: Any, event_id: Any, args: List[Any]) -> None:
         for method_name in ("postNotificationNameOnUIThread", "postNotificationName"):
@@ -1548,11 +1538,8 @@ class LocalSnosPlugin(BasePlugin):
                     method(event_id)
                 return
             except Exception:
-                try:
-                    method(event_id, args)
-                    return
-                except Exception:
-                    continue
+                _safe_log(f"{method_name} failed:\n{_format_exc()}")
+                continue
 
     def _refresh_fragment(self, fragment: Any) -> None:
         if fragment is None:
