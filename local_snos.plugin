@@ -175,7 +175,7 @@ __description__ = (
     "и локальным улучшением без Stars. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -635,7 +635,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.4.0 loaded")
+        self.log("Local Snos 1.4.1 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -3120,8 +3120,10 @@ class LocalSnosPlugin(BasePlugin):
         for class_name in GIFT_SHEET_CLASSES:
             self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
             self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
+            # Do not skip openUpgrade: native page runs roller.preload +
+            # setPreviewingAttributes (the cycling models before Confirm).
+            self._hook_all(class_name, "openUpgrade", before=self._before_open_upgrade, after=self._after_open_upgrade)
             # void methods only — never sendRequest (int token = crash).
-            self._hook_all(class_name, "openUpgrade", before=self._before_open_upgrade)
             self._hook_all(class_name, "doUpgrade", before=self._before_do_upgrade)
 
     def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
@@ -3297,10 +3299,43 @@ class LocalSnosPlugin(BasePlugin):
         rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
         if rec is None:
             return
-        self._skip_void(param)
+        # Let native openUpgrade run. Prepaid upgrade_stars skips payment
+        # form; sample_attributes lets it open the rolling preview page.
         self._mark_local_sheet(sheet, rec)
         self._prepare_local_sheet(sheet, rec)
-        run_on_ui_thread(lambda s=sheet, r=rec: self._open_local_upgrade_page(s, r), 10)
+        samples = self._sheet_sample_attributes(sheet)
+        if not samples:
+            samples = self._preview_samples.get(_as_int(rec.get("gift_id")))
+        if samples is not None:
+            try:
+                set_private_field(sheet, "sample_attributes", samples)
+            except Exception:
+                self._set_field(sheet, "sample_attributes", samples)
+
+    def _after_open_upgrade(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
+        if rec is None or sheet is None:
+            return
+        # If native returned early, still open the preview page so Roller exists.
+        if self._sheet_field(sheet, "roller") is not None:
+            return
+        samples = self._sheet_sample_attributes(sheet)
+        if samples is None:
+            samples = self._preview_samples.get(_as_int(rec.get("gift_id")))
+            if samples is not None:
+                try:
+                    set_private_field(sheet, "sample_attributes", samples)
+                except Exception:
+                    self._set_field(sheet, "sample_attributes", samples)
+        method = getattr(sheet, "openUpgradeAfter", None)
+        if callable(method):
+            try:
+                method()
+                return
+            except Exception:
+                _safe_log(f"openUpgradeAfter after-hook failed:\n{_format_exc()}")
+        self._java_call(sheet, "openUpgradeAfter")
 
     def _open_local_upgrade_page(self, sheet: Any, rec: Dict[str, Any]) -> None:
         if sheet is None or rec is None:
@@ -3513,8 +3548,6 @@ class LocalSnosPlugin(BasePlugin):
             return
         if rec.get("upgraded"):
             self._stop_sheet_loading(sheet)
-            self._switch_sheet_info(sheet)
-            self._refresh_gifts_ui()
             return
         try:
             catalog = self._catalog_by_id.get(_as_int(rec.get("gift_id")))
@@ -3539,21 +3572,23 @@ class LocalSnosPlugin(BasePlugin):
                 self._unique_attr_refs[str(rec.get("id"))] = attrs
             self._persist_gifts()
             unique_obj = self._build_unique_gift(rec, catalog)
-            applied = False
-            updates = self._build_upgrade_updates(rec, unique_obj) if unique_obj is not None else None
-            if sheet is not None and updates is not None:
+            rolled = False
+            if sheet is not None and unique_obj is not None:
                 try:
-                    applied = bool(self._apply_sheet_upgrade(sheet, rec, updates))
+                    rolled = bool(self._roll_sheet_to_unique(sheet, rec, unique_obj))
                 except Exception:
-                    applied = False
-                    _safe_log(f"apply sheet upgrade failed:\n{_format_exc()}")
-            if not applied and sheet is not None:
+                    rolled = False
+                    _safe_log(f"native roll failed:\n{_format_exc()}")
+            if not rolled and sheet is not None:
                 self._force_sheet_unique(sheet, rec, unique_obj)
-            self._switch_sheet_info(sheet)
+                self._switch_sheet_info(sheet)
             self._refresh_gifts_ui()
             title = self._gift_title(rec)
             num = _as_int((rec.get("unique") or {}).get("num"))
-            self._toast_success(f"{title} стал коллекционным #{num}")
+            run_on_ui_thread(
+                lambda t=title, n=num: self._toast_success(f"{t} стал коллекционным #{n}"),
+                1600,
+            )
         except Exception:
             _safe_log(f"complete upgrade crashed:\n{_format_exc()}")
             try:
@@ -3563,17 +3598,74 @@ class LocalSnosPlugin(BasePlugin):
         finally:
             self._stop_sheet_loading(sheet)
 
+    def _sheet_field(self, obj: Any, name: str) -> Any:
+        if obj is None:
+            return None
+        try:
+            value = get_private_field(obj, name)
+        except Exception:
+            value = getattr(obj, name, None)
+        return value
+
+    def _sheet_saved(self, sheet: Any) -> Any:
+        for name in ("savedStarGift", "savedGift", "saved_gift"):
+            saved = self._sheet_field(sheet, name)
+            if saved is not None:
+                return saved
+        return None
+
+    def _roll_sheet_to_unique(self, sheet: Any, rec: Dict[str, Any], unique_obj: Any) -> bool:
+        if sheet is None or unique_obj is None:
+            return False
+        saved = self._sheet_saved(sheet)
+        if saved is None:
+            return False
+        self._set_field(saved, "gift", unique_obj)
+        self._set_bool(saved, "can_upgrade", False)
+        flags = _as_int(getattr(saved, "flags", 0))
+        flags &= ~SAVED_FLAG_CAN_UPGRADE
+        flags &= ~SAVED_FLAG_UPGRADE_STARS
+        self._set_int(saved, "flags", flags)
+        samples = self._sheet_sample_attributes(sheet)
+        if not samples:
+            samples = self._preview_samples.get(_as_int(rec.get("gift_id")))
+        roller = self._sheet_field(sheet, "roller")
+        if roller is not None and samples is not None:
+            preload = getattr(roller, "preload", None)
+            if callable(preload):
+                try:
+                    preload(samples)
+                except Exception:
+                    _safe_log(f"roller.preload failed:\n{_format_exc()}")
+        self._set_bool(sheet, "upgradedOnce", True)
+        self._set_bool(sheet, "rolling", True)
+        gifts_list = self._sheet_field(sheet, "giftsList")
+        ok = False
+        setter = getattr(sheet, "set", None)
+        if callable(setter):
+            for args in ((saved, gifts_list), (saved,)):
+                try:
+                    setter(*args)
+                    ok = True
+                    break
+                except Exception:
+                    continue
+        if not ok:
+            invoked = self._java_call(sheet, "set", saved, gifts_list)
+            ok = invoked is not False
+        # Sheet.rolling is only the trigger for Roller.set inside native set().
+        # Roller keeps its own rolling flag for the slot-machine animation.
+        self._set_bool(sheet, "rolling", False)
+        if ok:
+            self._switch_sheet_info(sheet)
+        return ok
+
     def _force_sheet_unique(self, sheet: Any, rec: Dict[str, Any], unique_obj: Any) -> None:
         if sheet is None or unique_obj is None:
             return
-        saved = None
-        for name in ("savedStarGift", "savedGift", "saved_gift"):
-            try:
-                saved = get_private_field(sheet, name)
-            except Exception:
-                saved = getattr(sheet, name, None)
-            if saved is not None:
-                break
+        if self._roll_sheet_to_unique(sheet, rec, unique_obj):
+            return
+        saved = self._sheet_saved(sheet)
         if saved is not None:
             self._set_field(saved, "gift", unique_obj)
             self._set_bool(saved, "can_upgrade", False)
@@ -3582,16 +3674,9 @@ class LocalSnosPlugin(BasePlugin):
             flags &= ~SAVED_FLAG_UPGRADE_STARS
             self._set_int(saved, "flags", flags)
         try:
-            self._set_bool(sheet, "rolling", True)
-        except Exception:
-            pass
-        # Do not call sheet.set(saved, giftsList): native set rebinds every
-        # list item that shares the catalog gift id (all Pepes become one).
-        try:
             self._set_field(sheet, "savedStarGift", saved)
         except Exception:
             pass
-        run_on_ui_thread(lambda s=sheet: self._set_bool(s, "rolling", False), 900)
 
     def _apply_sheet_upgrade(self, sheet: Any, rec: Dict[str, Any], updates: Any) -> bool:
         if sheet is None or updates is None:
