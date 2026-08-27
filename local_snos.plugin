@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.8"
+__version__ = "1.1.9"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -486,7 +486,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.8 loaded")
+        self.log("Local Snos 1.1.9 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -2293,17 +2293,10 @@ class LocalSnosPlugin(BasePlugin):
                 if rec is None:
                     return HookResult()
                 name = _as_str(request_name).lower()
-                # Native StarGiftSheet needs getPaymentForm / upgradeStarGift
-                # to succeed so it can roll model/backdrop. Fake those in
-                # ConnectionsManager.sendRequest instead of cancelling here.
-                if (
-                    "upgrade" in name
-                    or "paymentform" in name
-                    or "payment_form" in name
-                    or "starsform" in name
-                    or "sendstarsform" in name
-                ):
+                if "preview" in name:
                     return HookResult()
+                # Never let upgrade/payment for a local gift hit Telegram.
+                # Native UI is driven by void openUpgrade/doUpgrade hooks.
                 self._on_blocked_local_request(request_name, rec)
                 return HookResult(strategy=HookStrategy.CANCEL)
         except Exception:
@@ -2501,6 +2494,9 @@ class LocalSnosPlugin(BasePlugin):
                 "invoice",
                 "saved_gift",
                 "savedGift",
+                "savedStarGift",
+                "saved_star_gift",
+                "messageObject",
                 "inputInvoice",
                 "inputGift",
                 "input_gift",
@@ -2540,14 +2536,20 @@ class LocalSnosPlugin(BasePlugin):
         return None
 
     def _on_blocked_local_request(self, request_name: str, rec: Dict[str, Any]) -> None:
+        name = _as_str(request_name).lower()
+        if (
+            "upgrade" in name
+            or "paymentform" in name
+            or "payment_form" in name
+            or "starsform" in name
+        ):
+            return
         if self._blocking_local:
             return
         self._blocking_local = True
-        self._suppress_gift_error += 1
 
         def _ui() -> None:
             self._blocking_local = False
-            self._suppress_gift_error = max(0, self._suppress_gift_error - 1)
             self._toast_error("Локальный подарок нельзя продать, передать или вывести")
 
         run_on_ui_thread(_ui)
@@ -2556,8 +2558,8 @@ class LocalSnosPlugin(BasePlugin):
         for class_name in GIFT_SHEET_CLASSES:
             self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
             self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
-            # Never hook all "set" overloads — too broad, crashes on bind.
-            # doUpgrade is void — setResult(None) is safe.
+            # void methods only — never sendRequest (int token = crash).
+            self._hook_all(class_name, "openUpgrade", before=self._before_open_upgrade)
             self._hook_all(class_name, "doUpgrade", before=self._before_do_upgrade)
 
     def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
@@ -2632,17 +2634,57 @@ class LocalSnosPlugin(BasePlugin):
 
     def _before_gift_sheet_show(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
-        rec = self._local_from_sheet(sheet, getattr(param, "args", None))
+        rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
         if rec is not None:
+            try:
+                setattr(sheet, "_local_snos_gift", rec.get("id"))
+            except Exception:
+                pass
             self._prepare_local_sheet(sheet, rec)
         return
+
+    def _sheet_local_rec(self, sheet: Any, args: Any = None) -> Optional[Dict[str, Any]]:
+        rec = self._local_from_sheet(sheet, args)
+        if rec is not None:
+            return rec
+        if sheet is not None:
+            marker = getattr(sheet, "_local_snos_gift", None)
+            if marker:
+                rec = self._gift_by_id(_as_str(marker))
+                if rec is not None:
+                    return rec
+        msg_id = 0
+        if sheet is not None:
+            for name in ("savedStarGift", "savedGift", "saved_gift"):
+                try:
+                    saved = get_private_field(sheet, name)
+                except Exception:
+                    saved = getattr(sheet, name, None)
+                if saved is not None:
+                    msg_id = _as_int(getattr(saved, "msg_id", 0))
+                    if msg_id:
+                        break
+        if LOCAL_MSG_MIN <= msg_id <= LOCAL_MSG_MAX:
+            for rec in self._gifts:
+                if _as_int(rec.get("msg_id")) == msg_id:
+                    return rec
+        return None
 
     def _local_from_sheet(self, sheet: Any, args: Any) -> Optional[Dict[str, Any]]:
         if sheet is not None:
             rec = self._local_record_from_obj(sheet)
             if rec is not None:
                 return rec
-            for name in ("savedGift", "gift", "slug", "messageId", "saved_id", "msg_id"):
+            for name in (
+                "savedStarGift",
+                "savedGift",
+                "saved_gift",
+                "gift",
+                "slug",
+                "messageId",
+                "saved_id",
+                "msg_id",
+            ):
                 try:
                     value = get_private_field(sheet, name)
                 except Exception:
@@ -2666,19 +2708,126 @@ class LocalSnosPlugin(BasePlugin):
                     return rec
         return None
 
-    def _before_do_upgrade(self, param: Any) -> None:
-        sheet = getattr(param, "thisObject", None)
-        rec = self._local_from_sheet(sheet, getattr(param, "args", None))
-        if rec is None and sheet is not None:
-            marker = getattr(sheet, "_local_snos_gift", None)
-            if marker:
-                rec = self._gift_by_id(_as_str(marker))
-        if rec is None:
-            return
+    def _skip_void(self, param: Any) -> None:
         try:
             param.setResult(None)
         except Exception:
             pass
+
+    def _before_open_upgrade(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
+        if rec is None:
+            return
+        self._skip_void(param)
+        try:
+            setattr(sheet, "_local_snos_gift", rec.get("id"))
+        except Exception:
+            pass
+        self._prepare_local_sheet(sheet, rec)
+        run_on_ui_thread(lambda s=sheet, r=rec: self._open_local_upgrade_page(s, r), 10)
+
+    def _open_local_upgrade_page(self, sheet: Any, rec: Dict[str, Any]) -> None:
+        if sheet is None or rec is None:
+            return
+        self._prepare_local_sheet(sheet, rec)
+
+        def _go(samples: Any) -> None:
+            if samples is not None:
+                try:
+                    set_private_field(sheet, "sample_attributes", samples)
+                except Exception:
+                    self._set_field(sheet, "sample_attributes", samples)
+            self._prepare_local_sheet(sheet, rec)
+            opened = False
+            method = getattr(sheet, "openUpgradeAfter", None)
+            if callable(method):
+                try:
+                    method()
+                    opened = True
+                except Exception:
+                    _safe_log(f"openUpgradeAfter failed:\n{_format_exc()}")
+            if not opened:
+                result = self._java_call(sheet, "openUpgradeAfter")
+                opened = result is not False
+            if not opened:
+                # Still keep native sheet; user can tap Confirm if page switched.
+                _safe_log("openUpgradeAfter missing, staying on info page")
+
+        samples = self._sheet_sample_attributes()
+        if samples:
+            _go(samples)
+            return
+        if self._native_gift_preview(_as_int(rec.get("gift_id")), lambda preview: _go(getattr(preview, "sample_attributes", None) if preview is not None else None)):
+            return
+        self._fetch_preview_samples(rec, _go)
+
+    def _native_gift_preview(self, gift_id: int, callback: Callable) -> bool:
+        if gift_id <= 0:
+            return False
+        account = self._selected_account()
+        sc = None
+        for class_name in (
+            "org.telegram.ui.Stars.StarsController",
+            "org.telegram.messenger.StarsController",
+        ):
+            cls = find_class(class_name)
+            if cls is None:
+                continue
+            method = getattr(cls, "getInstance", None)
+            if not callable(method):
+                continue
+            try:
+                sc = method(int(account))
+            except Exception:
+                try:
+                    sc = method()
+                except Exception:
+                    sc = None
+            if sc is not None:
+                break
+        if sc is None:
+            return False
+        preview = getattr(sc, "getStarGiftPreview", None)
+        if not callable(preview):
+            return False
+
+        def _cb(result: Any = None) -> None:
+            run_on_ui_thread(lambda: callback(result))
+
+        for args in ((_jlong(gift_id), _cb), (gift_id, _cb), (_jlong(gift_id),)):
+            try:
+                preview(*args)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _fetch_preview_samples(self, rec: Dict[str, Any], done: Callable[[Any], None]) -> None:
+        req = self._new_tl(TL_PREVIEW_NAMES) or self._new_tl(TL_ATTRS_NAMES)
+        if req is None:
+            done(None)
+            return
+        gift_id = _as_int(rec.get("gift_id"))
+        self._set_long(req, "gift_id", gift_id)
+
+        def _done(response: Any, error: Any) -> None:
+            def _ui() -> None:
+                samples = None
+                if response is not None:
+                    samples = getattr(response, "sample_attributes", None) or getattr(response, "attributes", None)
+                done(samples)
+
+            run_on_ui_thread(_ui)
+
+        self._send_req(req, _done, self._selected_account())
+
+    def _before_do_upgrade(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
+        if rec is None:
+            return
+        self._skip_void(param)
         gift_id = _as_str(rec.get("id") or "")
         run_on_ui_thread(lambda s=sheet, gid=gift_id: self._complete_sheet_upgrade(s, gid), 10)
 
