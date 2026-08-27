@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -118,9 +118,11 @@ LOCAL_SLUG_PREFIX = "local-ls-"
 
 SAVED_FLAG_FROM_ID = 1 << 1
 SAVED_FLAG_MSG_ID = 1 << 3
+SAVED_FLAG_UPGRADE_STARS = 1 << 6
 SAVED_FLAG_CAN_UPGRADE = 1 << 10
 SAVED_FLAG_SAVED_ID = 1 << 11
 SAVED_FLAG_PINNED = 1 << 12
+USERFULL_STARGIFTS_FLAG2 = 1 << 8  # userFull.flags2.stargifts_count
 
 GIFT_MUTATION_HINTS = (
     "upgradeStarGift",
@@ -407,6 +409,7 @@ class LocalSnosPlugin(BasePlugin):
         self._blocking_local = False
         self._unique_attr_refs: Dict[str, Any] = {}
         self._picker_gifts: List[Any] = []
+        self._gift_count_bump = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -423,7 +426,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.3 loaded")
+        self.log("Local Snos 1.1.4 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -1305,11 +1308,13 @@ class LocalSnosPlugin(BasePlugin):
         if not args:
             return
         self._maybe_touch_user_full(args[0])
+        self._maybe_bump_gifts_count(args[0])
 
     def _after_get_user_full(self, param: Any) -> None:
-        if not self._snos_ids:
-            return
-        self._maybe_touch_user_full(param.getResult())
+        result = param.getResult()
+        if self._snos_ids:
+            self._maybe_touch_user_full(result)
+        self._maybe_bump_gifts_count(result)
 
     def _after_avatar_set_info(self, param: Any) -> None:
         if not self._feature_enabled() or not self._snos_ids:
@@ -1862,7 +1867,8 @@ class LocalSnosPlugin(BasePlugin):
         self._catalog_by_id[gift_id] = catalog_gift
         self._gifts.append(rec)
         self._persist_gifts(reload_settings=True)
-        self._toast_success(f"{self._gift_title(rec)} на профиле. Тапни → Улучшить")
+        self._refresh_gifts_ui()
+        self._toast_success(f"{self._gift_title(rec)} на профиле. Тапни подарок → Улучшить")
         if again:
             run_on_ui_thread(self._show_catalog_categories, 280)
 
@@ -1927,6 +1933,7 @@ class LocalSnosPlugin(BasePlugin):
             self._toast_info("Подарок уже удалён")
             return
         self._persist_gifts(reload_settings=True)
+        self._refresh_gifts_ui()
         self._toast_success("Локальный подарок удалён")
 
     def _confirm_clear_gifts(self) -> None:
@@ -1937,6 +1944,7 @@ class LocalSnosPlugin(BasePlugin):
         def _ok(builder: Any = None, _which: Any = None) -> None:
             self._gifts = []
             self._persist_gifts(reload_settings=True)
+            self._refresh_gifts_ui()
             self._dismiss_quiet(builder)
             self._toast_success("Локальные подарки удалены")
 
@@ -1955,23 +1963,33 @@ class LocalSnosPlugin(BasePlugin):
         if rec.get("upgraded"):
             self._toast_info("Этот подарок уже коллекционный")
             return
-        spinner = self._show_spinner("Улучшение", "Собираем коллекционные атрибуты…")
+        unique = self._roll_unique(rec)
+        rec["unique"] = unique
+        rec["upgraded"] = True
+        rec["upgraded_at"] = int(time.time())
+        catalog = self._catalog_by_id.get(_as_int(rec.get("gift_id")))
+        attrs = self._synthetic_unique_attrs(rec, catalog)
+        if attrs is not None:
+            self._unique_attr_refs[str(rec.get("id"))] = attrs
+        self._persist_gifts()
+        self._refresh_gifts_ui()
+        self._play_upgrade_animation(rec, unique)
 
-        def _finish(unique: Dict[str, Any], attrs: Any = None) -> None:
+        def _apply_preview(meta: Dict[str, Any], preview_attrs: Any = None) -> None:
             live = self._gift_by_id(gift_id)
-            if live is None:
-                self._dismiss_quiet(spinner)
+            if live is None or not live.get("upgraded"):
                 return
-            live["unique"] = unique
-            live["upgraded"] = True
-            live["upgraded_at"] = int(time.time())
-            if attrs is not None:
-                self._unique_attr_refs[str(live.get("id"))] = attrs
+            if meta:
+                live["unique"] = meta
+            if preview_attrs is not None:
+                self._unique_attr_refs[str(live.get("id"))] = preview_attrs
             self._persist_gifts()
-            self._dismiss_quiet(spinner)
-            self._play_upgrade_animation(live, unique)
+            self._refresh_gifts_ui()
 
-        self._fetch_upgrade_preview(rec, _finish)
+        try:
+            self._fetch_upgrade_preview(rec, _apply_preview)
+        except Exception:
+            _safe_log(f"upgrade preview failed:\n{_format_exc()}")
 
     def _roll_unique(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         seed = _as_str(rec.get("id")) + str(rec.get("gift_id"))
@@ -2171,8 +2189,20 @@ class LocalSnosPlugin(BasePlugin):
     def _install_request_hooks(self) -> None:
         names = list(GIFT_MUTATION_HINTS) + list(PAYMENT_HINTS) + list(LIST_HINTS)
         names.append("getStarGifts")
+        names.append("upgradeStarGift")
+        names.append("getStarGiftUpgradePreview")
         for name in names:
             self._add_req_hook(name)
+        self._hook_all(
+            "org.telegram.messenger.NotificationCenter",
+            "postNotificationName",
+            before=self._before_post_notification,
+        )
+        self._hook_all(
+            "org.telegram.messenger.NotificationCenter",
+            "postNotificationNameOnUIThread",
+            before=self._before_post_notification,
+        )
 
     def _add_req_hook(self, name: str) -> None:
         try:
@@ -2242,21 +2272,18 @@ class LocalSnosPlugin(BasePlugin):
             return False
         peer = getattr(request, "peer", None)
         if peer is None:
-            return False
+            user_id = _as_int(getattr(request, "user_id", 0) or getattr(request, "id", 0))
+            return bool(user_id) and self._is_me(account, user_id)
         name = _class_name(peer).lower()
         if "self" in name:
             return True
-        user_id = _as_int(getattr(peer, "user_id", 0))
+        user_id = _as_int(getattr(peer, "user_id", 0) or getattr(peer, "userId", 0))
         if user_id and self._is_me(account, user_id):
             return True
         return False
 
     def _inject_local_gifts(self, response: Any) -> bool:
-        built: List[Any] = []
-        for rec in reversed(self._gifts):
-            obj = self._build_saved_gift(rec)
-            if obj is not None:
-                built.append(obj)
+        built = self._built_local_saved()
         if not built:
             return False
         current = _java_list(getattr(response, "gifts", None))
@@ -2272,10 +2299,25 @@ class LocalSnosPlugin(BasePlugin):
         except Exception:
             _safe_log(f"inject list failed:\n{_format_exc()}")
             return False
-        count = _as_int(getattr(response, "count", len(current)))
+        server = 0
+        for item in current:
+            if self._local_record_from_obj(item) is None:
+                server += 1
+        reported = _as_int(getattr(response, "count", server))
+        if reported < server:
+            reported = server
+        # Strip previously injected extras from server-reported count.
         extra = len(built)
-        self._set_field(response, "count", max(count, len(current)) + extra)
+        self._set_field(response, "count", reported - (len(current) - server) + extra)
         return True
+
+    def _built_local_saved(self) -> List[Any]:
+        built: List[Any] = []
+        for rec in reversed(self._gifts):
+            obj = self._build_saved_gift(rec)
+            if obj is not None:
+                built.append(obj)
+        return built
 
     def _build_saved_gift(self, rec: Dict[str, Any]) -> Any:
         saved = self._new_tl(TL_SAVED_NAMES)
@@ -2290,10 +2332,13 @@ class LocalSnosPlugin(BasePlugin):
         if gift_obj is None:
             return None
 
-        flags = SAVED_FLAG_FROM_ID | SAVED_FLAG_MSG_ID | SAVED_FLAG_SAVED_ID | SAVED_FLAG_PINNED
+        # User gifts use msg_id (flag 3). saved_id is for channel gifts and
+        # confuses StarGiftSheet / upgrade into a no-op.
+        flags = SAVED_FLAG_FROM_ID | SAVED_FLAG_MSG_ID | SAVED_FLAG_PINNED
         if not rec.get("upgraded"):
-            flags |= SAVED_FLAG_CAN_UPGRADE
+            flags |= SAVED_FLAG_CAN_UPGRADE | SAVED_FLAG_UPGRADE_STARS
             self._set_field(saved, "can_upgrade", True)
+            self._set_field(saved, "upgrade_stars", 1)
         else:
             self._set_field(saved, "can_upgrade", False)
 
@@ -2303,7 +2348,6 @@ class LocalSnosPlugin(BasePlugin):
         self._set_field(saved, "name_hidden", False)
         self._set_field(saved, "date", _as_int(rec.get("added_at"), int(time.time())))
         self._set_field(saved, "msg_id", _as_int(rec.get("msg_id")))
-        self._set_field(saved, "saved_id", _as_int(rec.get("saved_id")))
         self._set_field(saved, "gift", gift_obj)
         peer = self._self_peer()
         if peer is not None:
@@ -2315,7 +2359,8 @@ class LocalSnosPlugin(BasePlugin):
         if unique is None:
             return catalog
         meta = rec.get("unique") or {}
-        self._set_field(unique, "id", _as_int(rec.get("saved_id")) * -1)
+        unique_id = 9_000_000_000_000 + (_as_int(rec.get("msg_id")) % 1_000_000_000)
+        self._set_field(unique, "id", unique_id)
         self._set_field(unique, "gift_id", _as_int(rec.get("gift_id")))
         self._set_field(unique, "title", _as_str(meta.get("title") or rec.get("title") or "Collectible"))
         self._set_field(unique, "slug", _as_str(meta.get("slug") or rec.get("slug")))
@@ -2336,12 +2381,6 @@ class LocalSnosPlugin(BasePlugin):
         if attrs is None:
             attrs = _new_java_list()
         self._set_field(unique, "attributes", attrs)
-        # Telegram unique gifts draw the model sticker from attributes,
-        # but keep the original catalog document as a fallback when present.
-        if catalog is not None:
-            sticker = getattr(catalog, "sticker", None)
-            if sticker is not None:
-                self._set_field(unique, "sticker", sticker)
         return unique
 
     def _self_peer(self) -> Any:
@@ -2392,6 +2431,8 @@ class LocalSnosPlugin(BasePlugin):
                 "saved_gift",
                 "savedGift",
                 "inputInvoice",
+                "inputGift",
+                "input_gift",
             ):
                 child = getattr(current, name, None)
                 if child is not None and not isinstance(child, (str, int, float, bool)):
@@ -2401,6 +2442,16 @@ class LocalSnosPlugin(BasePlugin):
     def _match_local_gift(self, obj: Any) -> Optional[Dict[str, Any]]:
         msg_id = _as_int(getattr(obj, "msg_id", 0))
         saved_id = _as_int(getattr(obj, "saved_id", 0))
+        if not msg_id:
+            try:
+                msg_id = _as_int(get_private_field(obj, "msg_id"))
+            except Exception:
+                pass
+        if not saved_id:
+            try:
+                saved_id = _as_int(get_private_field(obj, "saved_id"))
+            except Exception:
+                pass
         slug = _as_str(getattr(obj, "slug", "") or "")
         for rec in self._gifts:
             if msg_id and msg_id == _as_int(rec.get("msg_id")):
@@ -2424,13 +2475,20 @@ class LocalSnosPlugin(BasePlugin):
 
         def _ui() -> None:
             self._blocking_local = False
-            name = _as_str(request_name)
-            if "upgrade" in name.lower():
-                gift_id = _as_str(rec.get("id") or "")
-                live = self._gift_by_id(gift_id)
-                if live is not None and not live.get("upgraded"):
+            name = _as_str(request_name).lower()
+            gift_id = _as_str(rec.get("id") or "")
+            live = self._gift_by_id(gift_id)
+            if live is not None and not live.get("upgraded"):
+                if (
+                    "upgrade" in name
+                    or "paymentform" in name
+                    or "payment_form" in name
+                    or "starsform" in name
+                    or "sendstarsform" in name
+                ):
                     self._upgrade_local_gift(gift_id)
                     return
+            if live is not None and live.get("upgraded") and "upgrade" in name:
                 self._toast_info("Локальный подарок уже коллекционный")
                 return
             self._toast_error("Локальный подарок нельзя продать, передать или вывести")
@@ -2441,6 +2499,14 @@ class LocalSnosPlugin(BasePlugin):
         for class_name in GIFT_SHEET_CLASSES:
             self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
             self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
+            for method_name in (
+                "upgradeGift",
+                "upgrade",
+                "doUpgrade",
+                "openUpgrade",
+                "onUpgrade",
+            ):
+                self._hook_all(class_name, method_name, before=self._before_sheet_upgrade)
 
     def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
         cls = find_class(class_name)
@@ -2469,29 +2535,25 @@ class LocalSnosPlugin(BasePlugin):
             pass
 
     def _before_gift_sheet_show(self, param: Any) -> None:
+        # Let Telegram draw the real StarGiftSheet (upgrade button included).
+        # Local upgrade is handled by cancelling getPaymentForm / upgradeStarGift.
+        return
+
+    def _before_sheet_upgrade(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
-        rec = self._local_from_sheet(sheet, None)
+        rec = self._local_from_sheet(sheet, getattr(param, "args", None))
         if rec is None:
             marker = getattr(sheet, "_local_snos_gift", None) if sheet is not None else None
             if marker:
                 rec = self._gift_by_id(_as_str(marker))
         if rec is None:
             return
-        # Upgraded collectibles keep Telegram's own unique sheet (1:1 look).
-        if rec.get("upgraded"):
-            return
         try:
             param.setResult(None)
         except Exception:
             pass
-        live = dict(rec)
-        run_on_ui_thread(lambda: self._open_local_gift_dialog(live), 60)
-        try:
-            dismiss = getattr(sheet, "dismiss", None)
-            if callable(dismiss):
-                run_on_ui_thread(dismiss, 10)
-        except Exception:
-            pass
+        gift_id = _as_str(rec.get("id") or "")
+        run_on_ui_thread(lambda: self._upgrade_local_gift(gift_id), 10)
 
     def _local_from_sheet(self, sheet: Any, args: Any) -> Optional[Dict[str, Any]]:
         if sheet is not None:
@@ -2522,7 +2584,179 @@ class LocalSnosPlugin(BasePlugin):
                     return rec
         return None
 
+    def _before_post_notification(self, param: Any) -> None:
+        if not self._gifts_enabled() or not self._gifts:
+            return
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        event = args[0]
+        star = None
+        if NotificationCenter is not None:
+            star = getattr(NotificationCenter, "starUserGiftsLoaded", None)
+        if star is None or _as_int(event) != _as_int(star):
+            return
+        gifts_list = None
+        dialog_id = 0
+        if len(args) >= 3:
+            dialog_id = _as_int(args[1])
+            gifts_list = args[2]
+        elif len(args) == 2:
+            gifts_list = args[1]
+        if gifts_list is None:
+            return
+        account = self._selected_account()
+        if dialog_id not in (0,) and not self._is_me(account, dialog_id):
+            return
+        self._inject_into_gifts_list(gifts_list)
+
+    def _maybe_bump_gifts_count(self, user_full: Any) -> None:
+        if user_full is None or not self._gifts_enabled():
+            extra = 0
+        else:
+            extra = len(self._gifts)
+        if user_full is None:
+            return
+        user_id = _as_int(getattr(user_full, "id", 0) or getattr(user_full, "user_id", 0))
+        if user_id and not self._is_me(self._selected_account(), user_id):
+            return
+        current = _as_int(getattr(user_full, "stargifts_count", 0))
+        prev = _as_int(getattr(self, "_gift_count_bump", 0))
+        base = current - prev
+        if base < 0:
+            base = current
+        new = base + extra
+        if new == current and prev == extra:
+            return
+        self._set_field(user_full, "stargifts_count", new)
+        flags2 = _as_int(getattr(user_full, "flags2", 0))
+        flags2 |= USERFULL_STARGIFTS_FLAG2
+        self._set_field(user_full, "flags2", flags2)
+        self._gift_count_bump = extra
+
+    def _inject_into_gifts_list(self, gifts_list: Any) -> None:
+        if gifts_list is None:
+            return
+        built = self._built_local_saved()
+        raw = getattr(gifts_list, "gifts", None)
+        if raw is None:
+            return
+        current = _java_list(raw)
+        locals_now = 0
+        kept: List[Any] = []
+        for item in current:
+            if self._local_record_from_obj(item) is not None:
+                locals_now += 1
+            else:
+                kept.append(item)
+        try:
+            raw.clear()
+        except Exception:
+            try:
+                while raw.size() > 0:
+                    raw.remove(0)
+            except Exception:
+                return
+        try:
+            for item in built:
+                raw.add(item)
+            for item in kept:
+                raw.add(item)
+        except Exception:
+            _safe_log(f"gifts list inject failed:\n{_format_exc()}")
+            return
+        total = _as_int(getattr(gifts_list, "totalCount", len(kept)))
+        server_total = max(0, total - locals_now)
+        self._set_field(gifts_list, "totalCount", server_total + len(built))
+
+    def _refresh_gifts_ui(self) -> None:
+        account = self._selected_account()
+        try:
+            me = 0
+            cfg = self._user_config(account)
+            if cfg is not None:
+                me = _as_int(getattr(cfg.getCurrentUser(), "id", 0))
+            user_full = self._get_user_full(account, me) if me else None
+            self._maybe_bump_gifts_count(user_full)
+        except Exception:
+            _safe_log(f"bump gifts count failed:\n{_format_exc()}")
+        try:
+            for gifts_list in self._iter_profile_gifts_lists(account):
+                self._inject_into_gifts_list(gifts_list)
+                notify = getattr(gifts_list, "notifyUpdate", None)
+                if callable(notify):
+                    try:
+                        notify()
+                    except Exception:
+                        pass
+        except Exception:
+            _safe_log(f"refresh gifts lists failed:\n{_format_exc()}")
+        try:
+            self._notify_ui(account)
+        except Exception:
+            pass
+
+    def _iter_profile_gifts_lists(self, account: int) -> List[Any]:
+        found: List[Any] = []
+        sc = None
+        for class_name in (
+            "org.telegram.ui.Stars.StarsController",
+            "org.telegram.messenger.StarsController",
+        ):
+            cls = find_class(class_name)
+            if cls is None:
+                continue
+            method = getattr(cls, "getInstance", None)
+            if not callable(method):
+                continue
+            try:
+                sc = method(int(account))
+            except Exception:
+                try:
+                    sc = method()
+                except Exception:
+                    sc = None
+            if sc is not None:
+                break
+        if sc is None:
+            return found
+        me = 0
+        try:
+            cfg = self._user_config(account)
+            if cfg is not None:
+                me = _as_int(getattr(cfg.getCurrentUser(), "id", 0))
+        except Exception:
+            me = 0
+        getter = getattr(sc, "getProfileGiftsList", None)
+        if callable(getter):
+            for key in (me, 0, _jlong(me) if me else 0):
+                if not key and key != 0:
+                    continue
+                for args in ((key,), (key, False), (key, True)):
+                    try:
+                        lst = getter(*args)
+                    except Exception:
+                        continue
+                    if lst is not None and lst not in found:
+                        found.append(lst)
+        mapping = None
+        try:
+            mapping = get_private_field(sc, "giftLists")
+        except Exception:
+            mapping = getattr(sc, "giftLists", None)
+        if mapping is not None:
+            try:
+                size = int(mapping.size())
+                for i in range(size):
+                    lst = mapping.valueAt(i)
+                    if lst is not None and lst not in found:
+                        found.append(lst)
+            except Exception:
+                pass
+        return found
+
     def _gift_is_unique_obj(self, gift: Any) -> bool:
+
         if gift is None:
             return False
         name = _class_name(gift).lower()
