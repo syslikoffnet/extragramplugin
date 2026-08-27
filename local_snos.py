@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -326,9 +326,14 @@ def _jint(value: int) -> Any:
     try:
         from java.lang import Integer
 
-        return Integer(int(value))
+        return Integer.valueOf(int(value))
     except Exception:
-        return int(value)
+        try:
+            from java.lang import Integer
+
+            return Integer(int(value))
+        except Exception:
+            return int(value)
 
 
 def _class_name(obj: Any) -> str:
@@ -463,7 +468,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.5 loaded")
+        self.log("Local Snos 1.1.6 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -2693,16 +2698,15 @@ class LocalSnosPlugin(BasePlugin):
         if not is_upgrade:
             return
         callback = self._request_callback(args)
+        # sendRequest returns int. Python 0 becomes java.lang.Long and
+        # crashes: ClassCastException Long cannot be cast to Integer.
         try:
-            param.setResult(0)
+            param.setResult(_jint(0))
         except Exception:
             try:
-                param.setResult(_jint(0))
+                param.setResult(None)
             except Exception:
-                try:
-                    param.setResult(None)
-                except Exception:
-                    pass
+                pass
         if "paymentform" in name or "payment_form" in name:
             form = self._fake_payment_form()
             if form is not None:
