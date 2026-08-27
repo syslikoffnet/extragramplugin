@@ -176,7 +176,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -376,15 +376,24 @@ UNIQUE_MODELS = (
     ("Obsidian", 0.6),
     ("Ivory", 4.2),
 )
+# name, rarity%, center, edge, pattern, text
 UNIQUE_BACKDROPS = (
-    ("Midnight", 4.8),
-    ("Sunset", 3.2),
-    ("Arctic", 2.7),
-    ("Royal", 1.6),
-    ("Jade", 5.1),
-    ("Cosmic", 1.3),
-    ("Amber", 3.9),
-    ("Noir", 0.7),
+    ("Midnight", 4.8, 0x1A1040, 0x050218, 0x8B7CFF, 0xFFFFFF),
+    ("Sunset", 3.2, 0xFF6B3D, 0x4A1020, 0xFFD1A3, 0xFFFFFF),
+    ("Arctic", 2.7, 0x7EC8E3, 0x0E2A40, 0xE8F6FF, 0x0A2030),
+    ("Royal", 1.6, 0x6B2D9B, 0x1A0830, 0xE0B3FF, 0xFFFFFF),
+    ("Jade", 5.1, 0x1FA37A, 0x06241C, 0xB8FFE0, 0xFFFFFF),
+    ("Cosmic", 1.3, 0x3D1B7A, 0x0A0418, 0xFF9EDB, 0xFFFFFF),
+    ("Amber", 3.9, 0xE09B2D, 0x3A1C08, 0xFFE4A3, 0x3A1C08),
+    ("Noir", 0.7, 0x2A2A32, 0x08080C, 0xC8C8D0, 0xFFFFFF),
+    ("Crimson", 2.0, 0xC41E3A, 0x2A0610, 0xFFB3C1, 0xFFFFFF),
+    ("Ocean", 3.4, 0x1565C0, 0x021428, 0x90CAF9, 0xFFFFFF),
+    ("Forest", 2.8, 0x2E7D32, 0x0A1F0C, 0xC8E6C9, 0xFFFFFF),
+    ("Gold", 1.1, 0xC9A227, 0x2A1E06, 0xFFF0B3, 0x2A1E06),
+    ("Pink", 4.0, 0xEC407A, 0x3A1020, 0xF8BBD0, 0xFFFFFF),
+    ("Mint", 3.6, 0x26A69A, 0x06201C, 0xB2DFDB, 0xFFFFFF),
+    ("Violet", 1.8, 0x7C4DFF, 0x16082A, 0xD1C4E9, 0xFFFFFF),
+    ("Copper", 2.5, 0xBF5B2A, 0x2A1208, 0xFFCCBC, 0xFFFFFF),
 )
 UNIQUE_PATTERNS = (
     ("Spark", 6.4),
@@ -614,7 +623,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.3.1 loaded")
+        self.log("Local Snos 1.3.2 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -2406,10 +2415,10 @@ class LocalSnosPlugin(BasePlugin):
             _safe_log(f"upgrade preview failed:\n{_format_exc()}")
 
     def _roll_unique(self, rec: Dict[str, Any]) -> Dict[str, Any]:
-        seed = _as_str(rec.get("id")) + str(rec.get("gift_id"))
+        seed = _as_str(rec.get("id")) + "|" + str(rec.get("gift_id")) + "|" + str(rec.get("msg_id"))
         rng = random.Random(seed)
         model, model_r = rng.choice(UNIQUE_MODELS)
-        backdrop, back_r = rng.choice(UNIQUE_BACKDROPS)
+        backdrop, back_r, center, edge, pattern_c, text_c = rng.choice(UNIQUE_BACKDROPS)
         pattern, pat_r = rng.choice(UNIQUE_PATTERNS)
         num = rng.randint(17, 49999)
         return {
@@ -2422,6 +2431,10 @@ class LocalSnosPlugin(BasePlugin):
             "backdrop_rarity": back_r,
             "pattern": pattern,
             "pattern_rarity": pat_r,
+            "center_color": int(center),
+            "edge_color": int(edge),
+            "pattern_color": int(pattern_c),
+            "text_color": int(text_c),
             "issued": max(num, 1000),
             "total": 50000,
         }
@@ -2815,9 +2828,12 @@ class LocalSnosPlugin(BasePlugin):
             flags = _as_int(getattr(unique, "flags", 0))
             flags |= 1
             self._set_int(unique, "flags", flags)
-        attrs = self._synthetic_unique_attrs(rec, catalog)
-        if attrs is not None:
-            self._unique_attr_refs[str(rec.get("id"))] = attrs
+        rec_id = str(rec.get("id"))
+        attrs = self._unique_attr_refs.get(rec_id)
+        if attrs is None or not _java_list(attrs):
+            attrs = self._synthetic_unique_attrs(rec, catalog)
+            if attrs is not None:
+                self._unique_attr_refs[rec_id] = attrs
         if attrs is None:
             attrs = _new_java_list()
         self._set_field(unique, "attributes", attrs)
@@ -3145,7 +3161,7 @@ class LocalSnosPlugin(BasePlugin):
             run_on_ui_thread(lambda s=sheet, r=rec: self._bind_confirm_button(s, r), 200)
             run_on_ui_thread(lambda s=sheet, r=rec: self._bind_confirm_button(s, r), 500)
 
-        samples = self._sheet_sample_attributes()
+        samples = self._sheet_sample_attributes(sheet)
         if samples:
             _go(samples)
             return
@@ -3309,7 +3325,7 @@ class LocalSnosPlugin(BasePlugin):
             catalog = self._catalog_by_id.get(_as_int(rec.get("gift_id")))
             meta = rec.get("unique") or self._roll_unique(rec)
             attrs = None
-            samples = self._sheet_sample_attributes()
+            samples = self._sheet_sample_attributes(sheet)
             if samples:
                 try:
                     meta, attrs = self._unique_from_preview(
@@ -3623,15 +3639,16 @@ class LocalSnosPlugin(BasePlugin):
                 pass
         return form
 
-    def _sheet_sample_attributes(self) -> Any:
-        for sheet in list(reversed(self._live_gift_sheets)):
-            for name in ("sample_attributes", "sampleAttributes"):
-                try:
-                    value = get_private_field(sheet, name)
-                except Exception:
-                    value = getattr(sheet, name, None)
-                if value is not None and _java_list(value):
-                    return value
+    def _sheet_sample_attributes(self, sheet: Any = None) -> Any:
+        if sheet is None:
+            return None
+        for name in ("sample_attributes", "sampleAttributes"):
+            try:
+                value = get_private_field(sheet, name)
+            except Exception:
+                value = getattr(sheet, name, None)
+            if value is not None and _java_list(value):
+                return value
         return None
 
     def _build_upgrade_payload(self, rec: Dict[str, Any], unique_obj: Any, wrap_payment: bool) -> Any:
@@ -3998,6 +4015,10 @@ class LocalSnosPlugin(BasePlugin):
             perm = _as_int(getattr(backdrop, "rarity_permille", 0))
             if perm:
                 meta["backdrop_rarity"] = round(perm / 10.0, 1)
+            for color_name in ("center_color", "edge_color", "pattern_color", "text_color"):
+                color = _as_int(getattr(backdrop, color_name, 0))
+                if color:
+                    meta[color_name] = color
         if patterns:
             pattern = rng.choice(patterns)
             picked.append(pattern)
@@ -4048,10 +4069,16 @@ class LocalSnosPlugin(BasePlugin):
             self._set_field(backdrop, "name", _as_str(meta.get("backdrop") or "Backdrop"))
             rarity = int(float(meta.get("backdrop_rarity") or 3.0) * 10)
             self._set_int(backdrop, "rarity_permille", rarity)
-            self._set_int(backdrop, "center_color", 0x3B1F6B)
-            self._set_int(backdrop, "edge_color", 0x12081F)
-            self._set_int(backdrop, "pattern_color", 0xF4C6FF)
-            self._set_int(backdrop, "text_color", 0xFFFFFF)
+            if not meta.get("center_color"):
+                rolled = self._roll_unique(rec)
+                for key in ("center_color", "edge_color", "pattern_color", "text_color", "backdrop", "backdrop_rarity"):
+                    if not meta.get(key) and rolled.get(key) is not None:
+                        meta[key] = rolled[key]
+                rec["unique"] = meta
+            self._set_int(backdrop, "center_color", _as_int(meta.get("center_color"), 0x1A1040))
+            self._set_int(backdrop, "edge_color", _as_int(meta.get("edge_color"), 0x050218))
+            self._set_int(backdrop, "pattern_color", _as_int(meta.get("pattern_color"), 0x8B7CFF))
+            self._set_int(backdrop, "text_color", _as_int(meta.get("text_color"), 0xFFFFFF))
             try:
                 attrs.add(backdrop)
                 added += 1
@@ -4435,33 +4462,10 @@ class LocalSnosPlugin(BasePlugin):
         run_on_ui_thread(_do, 120)
 
     def _post_notifications(self, account: int, user_id: Optional[int]) -> None:
-        nc = self._notification_center(account)
-        if nc is None or NotificationCenter is None:
-            return
-
-        mask = UPDATE_MASK_FALLBACK
-        value = 0
-        for name in (
-            "UPDATE_MASK_NAME",
-            "UPDATE_MASK_AVATAR",
-            "UPDATE_MASK_STATUS",
-            "UPDATE_MASK_PHONE",
-            "UPDATE_MASK_USER_PHONE",
-        ):
-            part = getattr(NotificationCenter, name, None)
-            if isinstance(part, int):
-                value |= part
-        if value:
-            mask = value
-
-        event_id = getattr(NotificationCenter, "updateInterfaces", None)
-        if event_id is None:
-            return
-
-        # Must be java.lang.Integer. A Python int becomes Long and
-        # DialogsActivity.didReceivedNotification crashes with
-        # ClassCastException: Long cannot be cast to Integer.
-        self._post_event(nc, event_id, [_jint(mask)])
+        # Never post updateInterfaces from Python. Chaquopy boxes ints as
+        # Long and DialogsActivity.didReceivedNotification crashes:
+        # Long cannot be cast to Integer. Profile/chat refresh is enough.
+        return
 
     def _post_event(self, nc: Any, event_id: Any, args: List[Any]) -> None:
         for method_name in ("postNotificationNameOnUIThread", "postNotificationName"):
