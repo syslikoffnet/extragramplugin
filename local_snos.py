@@ -69,7 +69,7 @@ __description__ = (
     "локальные подарки и улучшить их. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -164,10 +164,49 @@ TL_UNIQUE_NAMES = (
     "org.telegram.tgnet.TLRPC$TL_starGiftUnique",
 )
 TL_GET_GIFTS_NAMES = (
-    "org.telegram.tgnet.tl.TL_stars$TL_starGiftsGetStarGifts",
+    "org.telegram.tgnet.tl.TL_stars$TL_starGifts_getStarGifts",
     "org.telegram.tgnet.tl.TL_stars$TL_payments_getStarGifts",
-    "org.telegram.tgnet.TLRPC$TL_payments_getStarGifts",
     "org.telegram.tgnet.tl.TL_stars$getStarGifts",
+    "org.telegram.tgnet.TLRPC$TL_payments_getStarGifts",
+    "org.telegram.tgnet.TLRPC$TL_stars_getStarGifts",
+    "org.telegram.tgnet.tl.TL_stars$TL_getStarGifts",
+)
+TL_PREVIEW_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_payments_getStarGiftUpgradePreview",
+    "org.telegram.tgnet.tl.TL_stars$TL_starGifts_getStarGiftUpgradePreview",
+    "org.telegram.tgnet.TLRPC$TL_payments_getStarGiftUpgradePreview",
+    "org.telegram.tgnet.tl.TL_stars$getStarGiftUpgradePreview",
+)
+TL_ATTRS_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_payments_getStarGiftUpgradeAttributes",
+    "org.telegram.tgnet.tl.TL_stars$TL_starGifts_getStarGiftUpgradeAttributes",
+    "org.telegram.tgnet.TLRPC$TL_payments_getStarGiftUpgradeAttributes",
+)
+GIFT_CATEGORIES = (
+    ("Pepe / жабы", ("pepe", "toad", "frog", "жаб", "лягуш", "plush", "plushepe")),
+    ("Духи", ("perfume", "дух", "fragrance", "scent", "cologne", "flacon")),
+    ("Книги", ("book", "книг", "diary", "notebook", "journal")),
+    ("Ручки", ("pen", "ручк", "pencil", "marker", "fountain")),
+    ("Цветы", ("rose", "flower", "bouquet", "тюльпан", "роз", "цвет", "tulip", "lily")),
+    ("Сердца", ("heart", "сердц", "love", "valentine")),
+    ("Мишки / плюш", ("bear", "teddy", "мишк", "плюш", "bunny", "toy")),
+    ("Торты / еда", ("cake", "candy", "cookie", "шоколад", "торт", "еда", "champagne", "wine")),
+    ("Кольца / украшения", ("ring", "gem", "diamond", "кольц", "брилл", "necklace")),
+)
+TL_ATTR_MODEL_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_starGiftAttributeModel",
+    "org.telegram.tgnet.tl.TL_stars$starGiftAttributeModel",
+    "org.telegram.tgnet.TLRPC$TL_starGiftAttributeModel",
+)
+TL_ATTR_PATTERN_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_starGiftAttributePattern",
+    "org.telegram.tgnet.tl.TL_stars$starGiftAttributePattern",
+    "org.telegram.tgnet.TLRPC$TL_starGiftAttributePattern",
+)
+TL_ATTR_BACKDROP_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_starGiftAttributeBackdrop",
+    "org.telegram.tgnet.tl.TL_stars$starGiftAttributeBackdrop",
+    "org.telegram.tgnet.TLRPC$TL_starGiftAttributeBackdrop",
 )
 TL_PEER_USER_NAMES = (
     "org.telegram.tgnet.TLRPC$TL_peerUser",
@@ -366,6 +405,8 @@ class LocalSnosPlugin(BasePlugin):
         self._reapply_token = 0
         self._tl_cache: Dict[str, Any] = {}
         self._blocking_local = False
+        self._unique_attr_refs: Dict[str, Any] = {}
+        self._picker_gifts: List[Any] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -382,7 +423,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.1 loaded")
+        self.log("Local Snos 1.1.2 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -1677,7 +1718,7 @@ class LocalSnosPlugin(BasePlugin):
             ),
             Text(
                 text="Добавить подарок",
-                subtext="Выбери из каталога Telegram — появится у тебя в профиле",
+                subtext="Pepe, духи, жабы, книги, ручки и все остальные улучшаемые",
                 icon="msg_add",
                 on_click=lambda _view=None: self._start_add_gift(),
             ),
@@ -1788,7 +1829,7 @@ class LocalSnosPlugin(BasePlugin):
         if not self._gifts_enabled():
             self._toast_error("Локальные подарки выключены в настройках")
             return
-        spinner = self._show_spinner("Каталог подарков", "Загружаю доступные подарки…")
+        spinner = self._show_spinner("Каталог подарков", "Собираю все улучшаемые подарки…")
         account = self._selected_account()
 
         def _after(ok: bool, error: Optional[str]) -> None:
@@ -1796,48 +1837,117 @@ class LocalSnosPlugin(BasePlugin):
             if not ok:
                 self._toast_error(error or "Не удалось загрузить каталог")
                 return
-            self._show_catalog_picker()
+            self._show_catalog_categories()
 
         self._ensure_catalog(account, _after)
 
-    def _show_catalog_picker(self) -> None:
-        if not self._catalog:
-            self._toast_error("Каталог пуст")
-            return
-        labels: List[str] = []
-        gifts: List[Any] = []
-        for gift in self._catalog:
+    def _base_catalog(self) -> List[Any]:
+        result: List[Any] = []
+        seen: Set[int] = set()
+        for gift in list(self._catalog or []):
             if self._gift_is_unique_obj(gift):
                 continue
-            label = self._catalog_label(gift)
-            if not label:
+            gid = _as_int(getattr(gift, "id", 0))
+            if gid <= 0:
                 continue
-            labels.append(label)
-            gifts.append(gift)
-            if len(labels) >= 80:
-                break
-        if not labels:
-            self._toast_error("В каталоге нет обычных подарков")
+            if gid in seen:
+                continue
+            seen.add(gid)
+            result.append(gift)
+
+        def _sort_key(gift: Any) -> Any:
+            upgradeable = 0 if self._gift_can_upgrade(gift) else 1
+            sold = 0 if bool(getattr(gift, "sold_out", False)) else 1
+            title = self._gift_display_name(gift).lower()
+            return (upgradeable, sold, title)
+
+        result.sort(key=_sort_key)
+        return result
+
+    def _show_catalog_categories(self) -> None:
+        gifts = self._base_catalog()
+        if not gifts:
+            self._toast_error("Каталог пуст — открой в Telegram «Отправить подарок» и попробуй снова")
             return
+        upgradeable = [g for g in gifts if self._gift_can_upgrade(g)]
+        rows: List[str] = [
+            f"Все улучшаемые  ·  {len(upgradeable)}",
+            f"Все подарки  ·  {len(gifts)}",
+        ]
+        buckets: List[List[Any]] = [upgradeable or gifts, gifts]
+        for title, keys in GIFT_CATEGORIES:
+            matched = [g for g in gifts if self._gift_matches_keys(g, keys)]
+            if not matched:
+                continue
+            rows.append(f"{title}  ·  {len(matched)}")
+            buckets.append(matched)
 
         def _picked(builder: Any, which: int) -> None:
-            try:
-                builder.dismiss()
-            except Exception:
-                pass
-            if 0 <= which < len(gifts):
-                self._add_local_gift(gifts[which])
+            self._dismiss_quiet(builder)
+            if 0 <= which < len(buckets):
+                self._show_catalog_picker(buckets[which], rows[which])
 
-        self._show_items("Выбери подарок", labels, _picked)
+        self._show_items("Какой подарок добавить?", rows, _picked)
+
+    def _show_catalog_picker(self, gifts: Optional[List[Any]] = None, heading: str = "Выбери подарок") -> None:
+        pool = list(gifts or self._base_catalog())
+        if not pool:
+            self._toast_error("В этой категории пока пусто")
+            return
+        labels = [self._catalog_label(gift) for gift in pool]
+        self._picker_gifts = pool
+
+        def _picked(builder: Any, which: int) -> None:
+            self._dismiss_quiet(builder)
+            chosen = list(self._picker_gifts)
+            if 0 <= which < len(chosen):
+                self._add_local_gift(chosen[which], again=True)
+
+        title = heading.split("  ·  ")[0] if heading else "Выбери подарок"
+        self._show_items(title, labels, _picked)
+
+    def _gift_matches_keys(self, gift: Any, keys: Any) -> bool:
+        hay = " ".join(
+            [
+                self._gift_display_name(gift),
+                self._sticker_emoji(getattr(gift, "sticker", None)),
+                _as_str(getattr(gift, "title", "") or ""),
+            ]
+        ).lower()
+        return any(key in hay for key in keys)
+
+    def _gift_display_name(self, gift: Any) -> str:
+        title = _as_str(getattr(gift, "title", "") or "").strip()
+        if title:
+            return title
+        emoji = self._sticker_emoji(getattr(gift, "sticker", None))
+        if emoji and emoji != "🎁":
+            return emoji
+        return "Подарок"
+
+    def _gift_can_upgrade(self, gift: Any) -> bool:
+        if self._gift_is_unique_obj(gift):
+            return False
+        if _as_int(getattr(gift, "upgrade_stars", 0)) > 0:
+            return True
+        if _as_int(getattr(gift, "upgrade_variants", 0)) > 0:
+            return True
+        if bool(getattr(gift, "sold_out", False)) and _as_str(getattr(gift, "title", "") or "").strip():
+            return True
+        return bool(getattr(gift, "limited", False))
 
     def _catalog_label(self, gift: Any) -> str:
         emoji = self._sticker_emoji(getattr(gift, "sticker", None))
-        title = _as_str(getattr(gift, "title", "") or "").strip()
-        if not title:
-            title = "Подарок"
+        title = self._gift_display_name(gift)
+        bits = [f"{emoji} {title}".strip()]
+        if self._gift_can_upgrade(gift):
+            bits.append("можно улучшить")
+        if bool(getattr(gift, "sold_out", False)):
+            bits.append("sold out")
         stars = _as_int(getattr(gift, "stars", 0))
-        extra = f"  ·  {stars} ★" if stars else ""
-        return f"{emoji} {title}{extra}".strip()
+        if stars:
+            bits.append(f"{stars}★")
+        return "  ·  ".join(bits)
 
     def _sticker_emoji(self, sticker: Any) -> str:
         if sticker is None:
@@ -1848,7 +1958,7 @@ class LocalSnosPlugin(BasePlugin):
                 return value
         return "🎁"
 
-    def _add_local_gift(self, catalog_gift: Any) -> None:
+    def _add_local_gift(self, catalog_gift: Any, again: bool = False) -> None:
         gift_id = _as_int(getattr(catalog_gift, "id", 0))
         if gift_id <= 0:
             self._toast_error("У подарка нет id")
@@ -1858,18 +1968,22 @@ class LocalSnosPlugin(BasePlugin):
             "gift_id": gift_id,
             "msg_id": self._next_msg_id(),
             "saved_id": LOCAL_SAVED_BASE - (len(self._gifts) + 1),
-            "title": _as_str(getattr(catalog_gift, "title", "") or "").strip() or "Подарок",
+            "title": self._gift_display_name(catalog_gift),
             "emoji": self._sticker_emoji(getattr(catalog_gift, "sticker", None)),
             "stars": _as_int(getattr(catalog_gift, "stars", 0)),
             "limited": bool(getattr(catalog_gift, "limited", False)),
+            "can_upgrade": True,
             "upgraded": False,
             "unique": {},
             "added_at": int(time.time()),
         }
         rec["slug"] = LOCAL_SLUG_PREFIX + rec["id"]
+        self._catalog_by_id[gift_id] = catalog_gift
         self._gifts.append(rec)
         self._persist_gifts(reload_settings=True)
-        self._toast_success(f"{self._gift_title(rec)} добавлен. Открой свой профиль → Подарки")
+        self._toast_success(f"{self._gift_title(rec)} на профиле. Тапни → Улучшить")
+        if again:
+            run_on_ui_thread(self._show_catalog_categories, 280)
 
     def _open_local_gift_dialog(self, rec: Dict[str, Any]) -> None:
         unique = rec.get("unique") or {}
@@ -1960,12 +2074,23 @@ class LocalSnosPlugin(BasePlugin):
         if rec.get("upgraded"):
             self._toast_info("Этот подарок уже коллекционный")
             return
-        unique = self._roll_unique(rec)
-        rec["unique"] = unique
-        rec["upgraded"] = True
-        rec["upgraded_at"] = int(time.time())
-        self._persist_gifts()
-        self._play_upgrade_animation(rec, unique)
+        spinner = self._show_spinner("Улучшение", "Собираем коллекционные атрибуты…")
+
+        def _finish(unique: Dict[str, Any], attrs: Any = None) -> None:
+            live = self._gift_by_id(gift_id)
+            if live is None:
+                self._dismiss_quiet(spinner)
+                return
+            live["unique"] = unique
+            live["upgraded"] = True
+            live["upgraded_at"] = int(time.time())
+            if attrs is not None:
+                self._unique_attr_refs[str(live.get("id"))] = attrs
+            self._persist_gifts()
+            self._dismiss_quiet(spinner)
+            self._play_upgrade_animation(live, unique)
+
+        self._fetch_upgrade_preview(rec, _finish)
 
     def _roll_unique(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         seed = _as_str(rec.get("id")) + str(rec.get("gift_id"))
@@ -2024,16 +2149,103 @@ class LocalSnosPlugin(BasePlugin):
             return
         self._ensure_catalog(self._selected_account(), lambda _ok, _err: None)
 
+    def _ingest_catalog(self, gifts: Any) -> int:
+        added = 0
+        for gift in _java_list(gifts):
+            gid = _as_int(getattr(gift, "id", 0) or getattr(gift, "gift_id", 0))
+            if gid <= 0:
+                continue
+            existing = self._catalog_by_id.get(gid)
+            if existing is not None and self._gift_is_unique_obj(gift) and not self._gift_is_unique_obj(existing):
+                continue
+            if existing is None:
+                self._catalog.append(gift)
+                added += 1
+            self._catalog_by_id[gid] = gift if not self._gift_is_unique_obj(gift) else existing or gift
+        if self._catalog:
+            self._catalog_at = time.time()
+        return added
+
+    def _catalog_from_controller(self, account: int) -> int:
+        added = 0
+        for class_name in (
+            "org.telegram.messenger.StarsController",
+            "org.telegram.ui.Stars.StarsController",
+        ):
+            cls = find_class(class_name)
+            if cls is None:
+                continue
+            inst = None
+            for method_name in ("getInstance", "Instance"):
+                method = getattr(cls, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    inst = method(int(account))
+                    break
+                except Exception:
+                    try:
+                        inst = method()
+                        break
+                    except Exception:
+                        continue
+            if inst is None:
+                continue
+            for field in (
+                "gifts",
+                "sortedGifts",
+                "starGifts",
+                "allGifts",
+                "giftsList",
+                "birthdayGifts",
+                "auctionGifts",
+            ):
+                try:
+                    value = get_private_field(inst, field)
+                except Exception:
+                    value = getattr(inst, field, None)
+                if value is None:
+                    continue
+                added += self._ingest_catalog(value)
+                nested = getattr(value, "gifts", None)
+                if nested is not None and nested is not value:
+                    added += self._ingest_catalog(nested)
+            for method_name in ("loadStarGifts", "getStarGifts", "loadGifts"):
+                method = getattr(inst, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        try:
+                            method(False)
+                        except Exception:
+                            pass
+        return added
+
     def _ensure_catalog(self, account: int, callback: Callable[[bool, Optional[str]], None]) -> None:
-        if self._catalog and (time.time() - self._catalog_at) < 600:
-            callback(True, None)
+        answered = {"done": False}
+
+        def _once(ok: bool, error: Optional[str]) -> None:
+            if answered["done"]:
+                return
+            answered["done"] = True
+            callback(ok, error)
+
+        local = self._catalog_from_controller(account)
+        ready = bool(self._base_catalog())
+        if ready and (time.time() - self._catalog_at) < 600:
+            _once(True, None)
             return
         if self._catalog_loading:
             run_on_ui_thread(lambda: self._ensure_catalog(account, callback), 400)
             return
         req = self._new_tl(TL_GET_GIFTS_NAMES)
         if req is None and TLRPC is not None:
-            for name in ("TL_payments_getStarGifts", "TL_starGiftsGetStarGifts"):
+            for name in (
+                "TL_payments_getStarGifts",
+                "TL_starGiftsGetStarGifts",
+                "TL_stars_getStarGifts",
+            ):
                 ctor = getattr(TLRPC, name, None)
                 if callable(ctor):
                     try:
@@ -2042,11 +2254,14 @@ class LocalSnosPlugin(BasePlugin):
                     except Exception:
                         continue
         if req is None:
-            callback(False, "В этой сборке нет запроса каталога подарков")
+            if ready:
+                _once(True, None)
+                return
+            _once(False, "Не удалось создать запрос каталога. Открой «Отправить подарок» в Telegram и повтори.")
             return
         try:
             if hasattr(req, "hash"):
-                req.hash = 0
+                self._set_field(req, "hash", 0)
         except Exception:
             pass
         self._catalog_loading = True
@@ -2055,26 +2270,22 @@ class LocalSnosPlugin(BasePlugin):
             self._catalog_loading = False
 
             def _ui() -> None:
+                if response is not None:
+                    self._ingest_catalog(getattr(response, "gifts", None))
+                self._catalog_from_controller(account)
+                if self._base_catalog():
+                    _once(True, None)
+                    return
                 if error is not None:
-                    callback(False, _as_str(getattr(error, "text", None) or "Каталог недоступен"))
+                    _once(False, _as_str(getattr(error, "text", None) or "Каталог недоступен"))
                     return
-                gifts = _java_list(getattr(response, "gifts", None))
-                if not gifts:
-                    callback(False, "Каталог пуст")
-                    return
-                self._catalog = gifts
-                mapping: Dict[int, Any] = {}
-                for gift in gifts:
-                    gid = _as_int(getattr(gift, "id", 0))
-                    if gid:
-                        mapping[gid] = gift
-                self._catalog_by_id = mapping
-                self._catalog_at = time.time()
-                callback(True, None)
+                _once(False, "Каталог пуст")
 
             run_on_ui_thread(_ui)
 
         self._send_req(req, _done, account)
+        if ready:
+            _once(True, None)
 
     def _install_request_hooks(self) -> None:
         names = list(GIFT_MUTATION_HINTS) + list(PAYMENT_HINTS) + list(LIST_HINTS)
@@ -2122,16 +2333,7 @@ class LocalSnosPlugin(BasePlugin):
             if error or response is None:
                 return HookResult()
             if "getStarGifts" in _as_str(request_name) and "Saved" not in _as_str(request_name):
-                gifts = _java_list(getattr(response, "gifts", None))
-                if gifts:
-                    self._catalog = gifts
-                    mapping: Dict[int, Any] = {}
-                    for gift in gifts:
-                        gid = _as_int(getattr(gift, "id", 0))
-                        if gid:
-                            mapping[gid] = gift
-                    self._catalog_by_id = mapping
-                    self._catalog_at = time.time()
+                self._ingest_catalog(getattr(response, "gifts", None))
                 return HookResult()
             if not self._gifts_enabled() or not self._gifts:
                 return HookResult()
@@ -2245,11 +2447,20 @@ class LocalSnosPlugin(BasePlugin):
             flags = _as_int(getattr(unique, "flags", 0))
             flags |= 1
             self._set_field(unique, "flags", flags)
-        attrs = _new_java_list()
-        try:
-            self._set_field(unique, "attributes", attrs)
-        except Exception:
-            pass
+        attrs = self._unique_attr_refs.get(str(rec.get("id")))
+        if attrs is None or not _java_list(attrs):
+            attrs = self._synthetic_unique_attrs(rec, catalog)
+            if attrs is not None:
+                self._unique_attr_refs[str(rec.get("id"))] = attrs
+        if attrs is None:
+            attrs = _new_java_list()
+        self._set_field(unique, "attributes", attrs)
+        # Telegram unique gifts draw the model sticker from attributes,
+        # but keep the original catalog document as a fallback when present.
+        if catalog is not None:
+            sticker = getattr(catalog, "sticker", None)
+            if sticker is not None:
+                self._set_field(unique, "sticker", sticker)
         return unique
 
     def _self_peer(self) -> Any:
@@ -2385,6 +2596,9 @@ class LocalSnosPlugin(BasePlugin):
                 rec = self._gift_by_id(_as_str(marker))
         if rec is None:
             return
+        # Upgraded collectibles keep Telegram's own unique sheet (1:1 look).
+        if rec.get("upgraded"):
+            return
         try:
             param.setResult(None)
         except Exception:
@@ -2428,10 +2642,147 @@ class LocalSnosPlugin(BasePlugin):
         return None
 
     def _gift_is_unique_obj(self, gift: Any) -> bool:
+        if gift is None:
+            return False
         name = _class_name(gift).lower()
         if "unique" in name:
             return True
-        return hasattr(gift, "slug") and hasattr(gift, "num") and hasattr(gift, "attributes")
+        slug = _as_str(getattr(gift, "slug", None) or "").strip()
+        gift_id = _as_int(getattr(gift, "gift_id", 0))
+        # Unique collectibles have a real slug plus the base gift_id.
+        # Regular Java starGift objects often still *declare* slug/num/attributes.
+        if slug and gift_id > 0:
+            return True
+        return False
+
+    def _fetch_upgrade_preview(self, rec: Dict[str, Any], done: Callable) -> None:
+        gift_id = _as_int(rec.get("gift_id"))
+        fallback = self._roll_unique(rec)
+        if gift_id <= 0:
+            done(fallback, None)
+            return
+        req = self._new_tl(TL_PREVIEW_NAMES) or self._new_tl(TL_ATTRS_NAMES)
+        if req is None:
+            done(fallback, None)
+            return
+        try:
+            self._set_field(req, "gift_id", gift_id)
+        except Exception:
+            try:
+                req.gift_id = _jlong(gift_id)
+            except Exception:
+                done(fallback, None)
+                return
+
+        def _done(response: Any, error: Any) -> None:
+            def _ui() -> None:
+                if error or response is None:
+                    done(fallback, None)
+                    return
+                unique, attrs = self._unique_from_preview(rec, response, fallback)
+                done(unique, attrs)
+
+            run_on_ui_thread(_ui)
+
+        self._send_req(req, _done, self._selected_account())
+
+    def _unique_from_preview(self, rec: Dict[str, Any], response: Any, fallback: Dict[str, Any]) -> Any:
+        samples: List[Any] = []
+        for name in ("sample_attributes", "attributes", "models", "gifts"):
+            values = _java_list(getattr(response, name, None))
+            if values:
+                samples.extend(values)
+        models: List[Any] = []
+        patterns: List[Any] = []
+        backdrops: List[Any] = []
+        for item in samples:
+            nested = _java_list(getattr(item, "attributes", None))
+            pool = nested or [item]
+            for attr in pool:
+                aname = _class_name(attr).lower()
+                if "model" in aname:
+                    models.append(attr)
+                elif "pattern" in aname:
+                    patterns.append(attr)
+                elif "backdrop" in aname:
+                    backdrops.append(attr)
+        rng = random.Random(_as_str(rec.get("id")) + str(rec.get("gift_id")))
+        picked: List[Any] = []
+        meta = dict(fallback)
+        if models:
+            model = rng.choice(models)
+            picked.append(model)
+            meta["model"] = _as_str(getattr(model, "name", None) or meta.get("model"))
+            perm = _as_int(getattr(model, "rarity_permille", 0))
+            if perm:
+                meta["model_rarity"] = round(perm / 10.0, 1)
+        if backdrops:
+            backdrop = rng.choice(backdrops)
+            picked.append(backdrop)
+            meta["backdrop"] = _as_str(getattr(backdrop, "name", None) or meta.get("backdrop"))
+            perm = _as_int(getattr(backdrop, "rarity_permille", 0))
+            if perm:
+                meta["backdrop_rarity"] = round(perm / 10.0, 1)
+        if patterns:
+            pattern = rng.choice(patterns)
+            picked.append(pattern)
+            meta["pattern"] = _as_str(getattr(pattern, "name", None) or meta.get("pattern"))
+            perm = _as_int(getattr(pattern, "rarity_permille", 0))
+            if perm:
+                meta["pattern_rarity"] = round(perm / 10.0, 1)
+        attrs = _new_java_list()
+        try:
+            for attr in picked:
+                attrs.add(attr)
+        except Exception:
+            attrs = picked
+        return meta, (attrs if picked else None)
+
+    def _synthetic_unique_attrs(self, rec: Dict[str, Any], catalog: Any) -> Any:
+        meta = rec.get("unique") or {}
+        attrs = _new_java_list()
+        added = 0
+        model = self._new_tl(TL_ATTR_MODEL_NAMES)
+        if model is not None:
+            self._set_field(model, "name", _as_str(meta.get("model") or "Model"))
+            rarity = int(float(meta.get("model_rarity") or 1.0) * 10)
+            self._set_field(model, "rarity_permille", rarity)
+            sticker = getattr(catalog, "sticker", None) if catalog is not None else None
+            if sticker is not None:
+                self._set_field(model, "document", sticker)
+            try:
+                attrs.add(model)
+                added += 1
+            except Exception:
+                pass
+        pattern = self._new_tl(TL_ATTR_PATTERN_NAMES)
+        if pattern is not None:
+            self._set_field(pattern, "name", _as_str(meta.get("pattern") or "Pattern"))
+            rarity = int(float(meta.get("pattern_rarity") or 2.0) * 10)
+            self._set_field(pattern, "rarity_permille", rarity)
+            sticker = getattr(catalog, "sticker", None) if catalog is not None else None
+            if sticker is not None:
+                self._set_field(pattern, "document", sticker)
+            try:
+                attrs.add(pattern)
+                added += 1
+            except Exception:
+                pass
+        backdrop = self._new_tl(TL_ATTR_BACKDROP_NAMES)
+        if backdrop is not None:
+            self._set_field(backdrop, "name", _as_str(meta.get("backdrop") or "Backdrop"))
+            rarity = int(float(meta.get("backdrop_rarity") or 3.0) * 10)
+            self._set_field(backdrop, "rarity_permille", rarity)
+            self._set_field(backdrop, "center_color", 0x3B1F6B)
+            self._set_field(backdrop, "edge_color", 0x12081F)
+            self._set_field(backdrop, "pattern_color", 0xF4C6FF)
+            self._set_field(backdrop, "text_color", 0xFFFFFF)
+            try:
+                attrs.add(backdrop)
+                added += 1
+            except Exception:
+                pass
+        return attrs if added else None
 
     def _new_tl(self, names: Any) -> Any:
         for name in names:
