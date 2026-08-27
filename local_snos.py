@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -84,6 +84,7 @@ FROZEN_BIO_KEY = "frozen_bio"
 COMMAND_KEY = "command_enabled"
 GIFTS_ENABLED_KEY = "gifts_enabled"
 GIFTS_STORE_KEY = "local_gifts"
+GIFT_SEARCH_KEY = "gift_search"
 
 COMMAND_RE = re.compile(r"^\.(snos|unsnos)(?:\s+([\s\S]+))?$", re.IGNORECASE)
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{4,32}$")
@@ -92,8 +93,11 @@ TME_RE = re.compile(
     re.IGNORECASE,
 )
 
-# user.#83314fca flags
+# user.#83314fca flags — same bits Telegram uses for deleted users
+FLAG_FIRST_NAME = 1 << 1
+FLAG_LAST_NAME = 1 << 2
 FLAG_USERNAME = 1 << 3
+FLAG_PHONE = 1 << 4
 FLAG_PHOTO = 1 << 5
 FLAG_DELETED = 1 << 13
 FLAG_USERNAMES = 1 << 22
@@ -328,6 +332,15 @@ def _jlong(value: int) -> Any:
             return int(value)
 
 
+def _jbool(value: bool) -> Any:
+    try:
+        from java.lang import Boolean
+
+        return Boolean.TRUE if value else Boolean.FALSE
+    except Exception:
+        return bool(value)
+
+
 def _jint(value: int) -> Any:
     # Pass a string so Chaquopy does not box a Python int as java.lang.Long.
     text = str(int(value))
@@ -440,6 +453,7 @@ class LocalSnosPlugin(BasePlugin):
         self._status_refs: Dict[int, Any] = {}
         self._usernames_refs: Dict[int, Any] = {}
         self._emoji_refs: Dict[int, Any] = {}
+        self._phone_refs: Dict[int, Any] = {}
         self._applying = False
         self._db_stack: List[List[Any]] = []
         self._menu_ids: List[Any] = []
@@ -455,6 +469,7 @@ class LocalSnosPlugin(BasePlugin):
         self._blocking_local = False
         self._unique_attr_refs: Dict[str, Any] = {}
         self._picker_gifts: List[Any] = []
+        self._picker_heading = ""
         self._gift_count_bump = 0
         self._live_gift_sheets: List[Any] = []
         self._sheet_rec_ids: Dict[int, str] = {}
@@ -487,7 +502,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.2.0 loaded")
+        self.log("Local Snos 1.3.0 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -1011,6 +1026,7 @@ class LocalSnosPlugin(BasePlugin):
 
         self._snos_ids.add(user_id)
         self._persist_store()
+        self._commit_user(account, user)
         self._notify_ui(account, user_id, fragment)
         return True
 
@@ -1036,6 +1052,9 @@ class LocalSnosPlugin(BasePlugin):
         self._status_refs.pop(int(user_id), None)
         self._usernames_refs.pop(int(user_id), None)
         self._emoji_refs.pop(int(user_id), None)
+        self._phone_refs.pop(int(user_id), None)
+        if user is not None:
+            self._commit_user(account, user)
         if persist:
             self._persist_store(reload_settings=True)
         if notify:
@@ -1069,6 +1088,7 @@ class LocalSnosPlugin(BasePlugin):
                 user = self._get_user(account, user_id)
                 if user is not None:
                     self._mutate_user(user)
+                    self._commit_user(account, user)
                 user_full = self._get_user_full(account, user_id)
                 if user_full is not None:
                     self._mutate_user_full(user_full)
@@ -1088,6 +1108,8 @@ class LocalSnosPlugin(BasePlugin):
         user_id = _as_int(getattr(user, "id", 0))
         key = str(user_id)
         existing = self._records.get(key, {})
+        if existing and user_id in self._snos_ids:
+            return
         incoming_is_fake = self._looks_already_mutated(user)
         incoming_is_min = bool(getattr(user, "min", False))
 
@@ -1117,12 +1139,17 @@ class LocalSnosPlugin(BasePlugin):
         if emoji is not None:
             self._emoji_refs[user_id] = emoji
 
+        phone = getattr(user, "phone", None)
+        if phone:
+            self._phone_refs[user_id] = phone
+
         record = {
             "user_id": user_id,
             "account": account,
             "first_name": first,
             "last_name": last,
             "username": username,
+            "phone": _as_str(phone or existing.get("phone") or ""),
             "display": display,
             "deleted": bool(getattr(user, "deleted", False)),
             "premium": bool(getattr(user, "premium", False)),
@@ -1161,23 +1188,31 @@ class LocalSnosPlugin(BasePlugin):
             return
         self._applying = True
         try:
-            # Real frozen/deleted users have empty names. Telegram then
-            # draws LocaleController HiddenName via UserObject.getUserName.
+            # Telegram draws deleted users only when user.deleted is the
+            # primitive boolean. UserObject.isDeleted / getUserName / hasPhoto
+            # and AvatarDrawable.setInfo all read these fields.
             self._set_field(user, "first_name", "")
             self._set_field(user, "last_name", "")
             self._set_field(user, "username", None)
-            self._set_field(user, "deleted", True)
-            self._set_field(user, "premium", False)
-            self._set_field(user, "verified", False)
+            self._set_field(user, "phone", None)
+            self._set_bool(user, "deleted", True)
+            self._set_bool(user, "premium", False)
+            self._set_bool(user, "verified", False)
+            self._set_bool(user, "min", False)
             self._set_field(user, "photo", self._empty_photo())
             self._set_field(user, "emoji_status", None)
+            self._set_field(user, "color", None)
+            self._set_field(user, "profile_color", None)
 
             flags = _as_int(getattr(user, "flags", 0))
             flags |= FLAG_DELETED
+            flags &= ~FLAG_FIRST_NAME
+            flags &= ~FLAG_LAST_NAME
             flags &= ~FLAG_USERNAME
+            flags &= ~FLAG_PHONE
             flags &= ~FLAG_PHOTO
             flags &= ~FLAG_USERNAMES
-            self._set_field(user, "flags", flags)
+            self._set_int(user, "flags", flags)
 
             usernames = getattr(user, "usernames", None)
             if usernames is not None:
@@ -1212,15 +1247,18 @@ class LocalSnosPlugin(BasePlugin):
         self._set_field(user, "last_name", record.get("last_name") or "")
         username = record.get("username") or None
         self._set_field(user, "username", username)
-        self._set_field(user, "deleted", bool(record.get("deleted", False)))
+        self._set_bool(user, "deleted", bool(record.get("deleted", False)))
         if "premium" in record:
-            self._set_field(user, "premium", bool(record.get("premium")))
+            self._set_bool(user, "premium", bool(record.get("premium")))
         if "verified" in record:
-            self._set_field(user, "verified", bool(record.get("verified")))
+            self._set_bool(user, "verified", bool(record.get("verified")))
         if "flags" in record:
-            self._set_field(user, "flags", _as_int(record.get("flags"), 0))
+            self._set_int(user, "flags", _as_int(record.get("flags"), 0))
         if "flags2" in record:
-            self._set_field(user, "flags2", _as_int(record.get("flags2"), 0))
+            self._set_int(user, "flags2", _as_int(record.get("flags2"), 0))
+        phone = self._phone_refs.get(user_id) or record.get("phone")
+        if phone:
+            self._set_field(user, "phone", phone)
 
         photo = self._photo_refs.get(user_id)
         if photo is None:
@@ -1312,6 +1350,27 @@ class LocalSnosPlugin(BasePlugin):
             "setInfo",
             after=self._after_avatar_set_info,
         )
+        # Real methods Telegram uses to render deleted users.
+        self._hook_all(
+            "org.telegram.messenger.UserObject",
+            "isDeleted",
+            after=self._after_user_is_deleted,
+        )
+        self._hook_all(
+            "org.telegram.messenger.UserObject",
+            "getUserName",
+            after=self._after_user_get_name,
+        )
+        self._hook_all(
+            "org.telegram.messenger.UserObject",
+            "hasPhoto",
+            after=self._after_user_has_photo,
+        )
+        self._hook_all(
+            "org.telegram.ui.Components.ChatAvatarContainer",
+            "setUserAvatar",
+            after=self._after_set_user_avatar,
+        )
         self._hook_all(
             "org.telegram.messenger.MessagesStorage",
             "putUsersAndChats",
@@ -1402,7 +1461,7 @@ class LocalSnosPlugin(BasePlugin):
             except Exception:
                 user_id = None
         if user_id in self._snos_ids:
-            self._set_field(target, "drawDeleted", True)
+            self._set_bool(target, "drawDeleted", True)
 
     def _before_put_users_and_chats(self, param: Any) -> None:
         if not self._snos_ids:
@@ -1426,6 +1485,120 @@ class LocalSnosPlugin(BasePlugin):
             return
         for user in touched:
             self._mutate_user(user)
+
+    def _snos_id_from_user(self, user: Any) -> int:
+        if _is_tl_user(user):
+            return _as_int(getattr(user, "id", 0))
+        return 0
+
+    def _after_user_is_deleted(self, param: Any) -> None:
+        if not self._feature_enabled() or not self._snos_ids:
+            return
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        uid = self._snos_id_from_user(args[0])
+        if uid in self._snos_ids:
+            try:
+                param.setResult(_jbool(True))
+            except Exception:
+                try:
+                    param.setResult(True)
+                except Exception:
+                    pass
+
+    def _after_user_get_name(self, param: Any) -> None:
+        if not self._feature_enabled() or not self._snos_ids:
+            return
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        uid = self._snos_id_from_user(args[0])
+        if uid not in self._snos_ids:
+            return
+        name = self._hidden_name()
+        if not name:
+            return
+        try:
+            param.setResult(name)
+        except Exception:
+            pass
+
+    def _after_user_has_photo(self, param: Any) -> None:
+        if not self._feature_enabled() or not self._snos_ids:
+            return
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        uid = self._snos_id_from_user(args[0])
+        if uid in self._snos_ids:
+            try:
+                param.setResult(_jbool(False))
+            except Exception:
+                try:
+                    param.setResult(False)
+                except Exception:
+                    pass
+
+    def _after_set_user_avatar(self, param: Any) -> None:
+        if not self._feature_enabled() or not self._snos_ids:
+            return
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        user = args[0]
+        uid = self._snos_id_from_user(user)
+        if uid not in self._snos_ids:
+            return
+        self._mutate_user(user)
+        target = getattr(param, "thisObject", None)
+        drawable = None
+        try:
+            drawable = get_private_field(target, "avatarDrawable")
+        except Exception:
+            drawable = getattr(target, "avatarDrawable", None) if target is not None else None
+        if drawable is not None:
+            self._set_bool(drawable, "drawDeleted", True)
+            self._call_set_info(drawable, user)
+
+    def _hidden_name(self) -> str:
+        try:
+            from org.telegram.messenger import LocaleController
+
+            try:
+                from org.telegram.messenger import R
+
+                value = LocaleController.getString(R.string.HiddenName)
+                if value:
+                    return _as_str(value)
+            except Exception:
+                pass
+            for args in (("HiddenName",), ("HiddenName", 0)):
+                try:
+                    value = LocaleController.getString(*args)
+                    if value:
+                        return _as_str(value)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return ""
+
+    def _commit_user(self, account: int, user: Any) -> None:
+        if user is None:
+            return
+        mc = self._messages_controller(account)
+        if mc is None:
+            return
+        method = getattr(mc, "putUser", None)
+        if not callable(method):
+            return
+        for args in ((user, False), (user, False, True)):
+            try:
+                method(*args)
+                return
+            except Exception:
+                continue
 
     def _install_frozen_ui_hooks(self) -> None:
         self._hook_all(
@@ -1654,6 +1827,20 @@ class LocalSnosPlugin(BasePlugin):
                 return rec
         return None
 
+    def _settings_input(self, key: str, text: str, subtext: str) -> Any:
+        for kwargs in (
+            dict(key=key, text=text, default="", subtext=subtext, icon="msg_search"),
+            dict(key=key, text=text, default="", subtext=subtext),
+            dict(key=key, text=text, default=""),
+        ):
+            try:
+                return Input(**kwargs)
+            except TypeError:
+                continue
+            except Exception:
+                continue
+        return Text(text=text, subtext=subtext, icon="msg_search")
+
     def _gift_settings_rows(self) -> List[Any]:
         rows: List[Any] = [
             Divider(text="Локальные подарки"),
@@ -1664,9 +1851,20 @@ class LocalSnosPlugin(BasePlugin):
                 subtext="Только у тебя. Настоящие подарки плагин не трогает",
                 icon="msg_gift",
             ),
+            self._settings_input(
+                GIFT_SEARCH_KEY,
+                "Поиск подарка",
+                "Название или эмодзи — потом нажми «Найти»",
+            ),
             Text(
-                text="Добавить подарок",
-                subtext="Pepe, духи, жабы, книги, ручки и все остальные улучшаемые",
+                text="Найти и добавить",
+                subtext="Только обычные (неулучшенные) подарки из каталога",
+                icon="msg_search",
+                on_click=lambda _view=None: self._start_add_gift(search=True),
+            ),
+            Text(
+                text="Все улучшаемые",
+                subtext="Pepe, духи, жабы, книги, ручки — поиск внутри списка",
                 icon="msg_add",
                 on_click=lambda _view=None: self._start_add_gift(),
             ),
@@ -1744,8 +1942,8 @@ class LocalSnosPlugin(BasePlugin):
 
     def _open_gifts_manager(self) -> None:
         self._reload_gifts()
-        items = ["Добавить подарок из каталога"]
-        ids: List[Optional[str]] = [None]
+        items = ["Добавить улучшаемый подарок", "Найти по названию"]
+        ids: List[Optional[str]] = [None, "__search__"]
         for rec in reversed(self._gifts):
             mark = "★ " if rec.get("upgraded") else ""
             items.append(f"{mark}{self._gift_title(rec)}")
@@ -1765,6 +1963,9 @@ class LocalSnosPlugin(BasePlugin):
             if chosen is None:
                 self._start_add_gift()
                 return
+            if chosen == "__search__":
+                self._start_add_gift(search=True)
+                return
             if chosen == "__empty__":
                 return
             rec = self._gift_by_id(chosen)
@@ -1773,17 +1974,20 @@ class LocalSnosPlugin(BasePlugin):
 
         self._show_items("Локальные подарки", items, _picked)
 
-    def _start_add_gift(self) -> None:
+    def _start_add_gift(self, search: bool = False) -> None:
         if not self._gifts_enabled():
             self._toast_error("Локальные подарки выключены в настройках")
             return
-        spinner = self._show_spinner("Каталог подарков", "Собираю все улучшаемые подарки…")
+        spinner = self._show_spinner("Каталог подарков", "Собираю неулучшенные подарки…")
         account = self._selected_account()
 
         def _after(ok: bool, error: Optional[str]) -> None:
             self._dismiss_quiet(spinner)
             if not ok:
                 self._toast_error(error or "Не удалось загрузить каталог")
+                return
+            if search:
+                self._prompt_gift_search()
                 return
             self._show_catalog_categories()
 
@@ -1805,26 +2009,34 @@ class LocalSnosPlugin(BasePlugin):
 
         def _sort_key(gift: Any) -> Any:
             upgradeable = 0 if self._gift_can_upgrade(gift) else 1
+            limited = 0 if bool(getattr(gift, "limited", False)) or bool(getattr(gift, "sold_out", False)) else 1
             sold = 0 if bool(getattr(gift, "sold_out", False)) else 1
             title = self._gift_display_name(gift).lower()
-            return (upgradeable, sold, title)
+            return (upgradeable, limited, sold, title)
 
         result.sort(key=_sort_key)
         return result
+
+    def _upgradeable_catalog(self) -> List[Any]:
+        return [g for g in self._base_catalog() if self._gift_can_upgrade(g)]
 
     def _show_catalog_categories(self) -> None:
         gifts = self._base_catalog()
         if not gifts:
             self._toast_error("Каталог пуст — открой в Telegram «Отправить подарок» и попробуй снова")
             return
-        upgradeable = [g for g in gifts if self._gift_can_upgrade(g)]
+        upgradeable = self._upgradeable_catalog() or gifts
         rows: List[str] = [
+            f"🔎 Поиск по названию",
             f"Все улучшаемые  ·  {len(upgradeable)}",
-            f"Все подарки  ·  {len(gifts)}",
         ]
-        buckets: List[List[Any]] = [upgradeable or gifts, gifts]
+        buckets: List[Any] = ["__search__", upgradeable]
+        sold = [g for g in upgradeable if bool(getattr(g, "sold_out", False)) or bool(getattr(g, "limited", False))]
+        if sold:
+            rows.append(f"Лимитки / sold out  ·  {len(sold)}")
+            buckets.append(sold)
         for title, keys in GIFT_CATEGORIES:
-            matched = [g for g in gifts if self._gift_matches_keys(g, keys)]
+            matched = [g for g in upgradeable if self._gift_matches_keys(g, keys)]
             if not matched:
                 continue
             rows.append(f"{title}  ·  {len(matched)}")
@@ -1832,26 +2044,66 @@ class LocalSnosPlugin(BasePlugin):
 
         def _picked(builder: Any, which: int) -> None:
             self._dismiss_quiet(builder)
-            if 0 <= which < len(buckets):
-                self._show_catalog_picker(buckets[which], rows[which])
+            if which < 0 or which >= len(buckets):
+                return
+            chosen = buckets[which]
+            if chosen == "__search__":
+                self._prompt_gift_search()
+                return
+            self._show_catalog_picker(chosen, rows[which])
 
-        self._show_items("Какой подарок добавить?", rows, _picked)
+        self._show_items("Неулучшенный подарок на профиль", rows, _picked)
+
+    def _prompt_gift_search(self) -> None:
+        preset = _as_str(self.get_setting(GIFT_SEARCH_KEY, "")).strip()
+
+        def _run(query: str) -> None:
+            q = _as_str(query or "").strip()
+            try:
+                self.set_setting(GIFT_SEARCH_KEY, q)
+            except Exception:
+                pass
+            self._show_search_results(q)
+
+        if preset:
+            self._prompt_text("Поиск подарка", "Название или эмодзи", _run, preset)
+            return
+        self._prompt_text("Поиск подарка", "Название или эмодзи", _run, "")
+
+    def _show_search_results(self, query: str) -> None:
+        q = _as_str(query).strip().lower()
+        pool = self._upgradeable_catalog() or self._base_catalog()
+        if q:
+            pool = [g for g in pool if q in self._catalog_label(g).lower() or q in self._gift_display_name(g).lower()]
+        if not pool:
+            self._toast_info("Ничего не нашёл. Попробуй другое название")
+            run_on_ui_thread(self._prompt_gift_search, 250)
+            return
+        heading = f"Поиск: {query}" if query else "Все улучшаемые"
+        self._show_catalog_picker(pool, heading)
 
     def _show_catalog_picker(self, gifts: Optional[List[Any]] = None, heading: str = "Выбери подарок") -> None:
-        pool = list(gifts or self._base_catalog())
+        pool = list(gifts or self._upgradeable_catalog() or self._base_catalog())
         if not pool:
             self._toast_error("В этой категории пока пусто")
             return
-        labels = [self._catalog_label(gift) for gift in pool]
         self._picker_gifts = pool
+        self._picker_heading = heading
+        labels = [self._catalog_label(gift) for gift in pool]
+        title = heading.split("  ·  ")[0] if heading else "Выбери подарок"
+        if len(labels) > 80:
+            labels = labels[:80]
+            labels.append("… ещё, воспользуйся поиском")
 
         def _picked(builder: Any, which: int) -> None:
             self._dismiss_quiet(builder)
             chosen = list(self._picker_gifts)
+            if which == 80 or (0 <= which < len(labels) and labels[which].startswith("…")):
+                self._prompt_gift_search()
+                return
             if 0 <= which < len(chosen):
-                self._add_local_gift(chosen[which], again=True)
+                self._add_local_gift(chosen[which], again=True, reopen=list(chosen), heading=heading)
 
-        title = heading.split("  ·  ")[0] if heading else "Выбери подарок"
         self._show_items(title, labels, _picked)
 
     def _gift_matches_keys(self, gift: Any, keys: Any) -> bool:
@@ -1906,7 +2158,13 @@ class LocalSnosPlugin(BasePlugin):
                 return value
         return "🎁"
 
-    def _add_local_gift(self, catalog_gift: Any, again: bool = False) -> None:
+    def _add_local_gift(
+        self,
+        catalog_gift: Any,
+        again: bool = False,
+        reopen: Optional[List[Any]] = None,
+        heading: str = "",
+    ) -> None:
         gift_id = _as_int(getattr(catalog_gift, "id", 0))
         if gift_id <= 0:
             self._toast_error("У подарка нет id")
@@ -1936,9 +2194,15 @@ class LocalSnosPlugin(BasePlugin):
             self._refresh_gifts_ui()
         except Exception:
             _safe_log(f"refresh after add failed:\n{_format_exc()}")
-        self._toast_success(f"{self._gift_title(rec)} на профиле. Тапни подарок → Улучшить")
+        self._toast_success(f"{self._gift_title(rec)} на профиле. Можно добавить ещё")
         if again:
-            run_on_ui_thread(self._show_catalog_categories, 280)
+            if reopen:
+                run_on_ui_thread(
+                    lambda pool=list(reopen), h=heading or "Выбери подарок": self._show_catalog_picker(pool, h),
+                    280,
+                )
+            else:
+                run_on_ui_thread(self._show_catalog_categories, 280)
 
     def _open_local_gift_dialog(self, rec: Dict[str, Any]) -> None:
         unique = rec.get("unique") or {}
@@ -4127,6 +4391,7 @@ class LocalSnosPlugin(BasePlugin):
             ("updateProfileData", ()),
             ("updateTitle", ()),
             ("updateSubtitle", ()),
+            ("updateOnlineDisplay", ()),
         ):
             method = getattr(fragment, name, None)
             if callable(method):
@@ -4190,6 +4455,63 @@ class LocalSnosPlugin(BasePlugin):
         except Exception:
             _safe_log(f"spinner failed:\n{_format_exc()}")
             return None
+
+    def _prompt_text(
+        self,
+        title: str,
+        hint: str,
+        on_done: Callable[[str], None],
+        preset: str = "",
+    ) -> None:
+        activity = self._activity()
+        if activity is None:
+            on_done(preset)
+            return
+        try:
+            from android.widget import EditText, FrameLayout
+            from android.app import AlertDialog
+            from android.content import DialogInterface
+
+            density = float(activity.getResources().getDisplayMetrics().density)
+            pad = int(density * 20)
+            wrap = FrameLayout(activity)
+            wrap.setPadding(pad, int(density * 8), pad, 0)
+            edit = EditText(activity)
+            edit.setHint(hint)
+            edit.setSingleLine(True)
+            if preset:
+                edit.setText(preset)
+                try:
+                    edit.setSelection(len(preset))
+                except Exception:
+                    pass
+            wrap.addView(edit)
+
+            class _Ok(DialogInterface.OnClickListener):
+                def onClick(self, dialog: Any, which: int) -> None:
+                    try:
+                        value = _as_str(edit.getText())
+                    except Exception:
+                        value = preset
+                    on_done(value)
+
+            class _Cancel(DialogInterface.OnClickListener):
+                def onClick(self, dialog: Any, which: int) -> None:
+                    return
+
+            builder = AlertDialog.Builder(activity)
+            builder.setTitle(title)
+            builder.setView(wrap)
+            builder.setPositiveButton("Найти", _Ok())
+            builder.setNegativeButton("Отмена", _Cancel())
+            builder.show()
+            return
+        except Exception:
+            _safe_log(f"prompt text failed:\n{_format_exc()}")
+        if preset:
+            on_done(preset)
+            return
+        self._toast_info("Введи название в настройках плагина → Поиск подарка")
 
     def _show_items(self, title: str, items: List[str], on_pick: Callable[..., None]) -> None:
         activity = self._activity()
