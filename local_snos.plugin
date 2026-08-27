@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -213,6 +213,39 @@ TL_ATTR_BACKDROP_NAMES = (
 TL_PEER_USER_NAMES = (
     "org.telegram.tgnet.TLRPC$TL_peerUser",
     "org.telegram.tgnet.TLRPC$TL_peerUser",
+)
+TL_UPDATES_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_updates",
+    "org.telegram.tgnet.TLRPC$Updates",
+)
+TL_UPDATE_NEW_MSG_NAMES = (
+    "org.telegram.tgnet.tl.TL_update$TL_updateNewMessage",
+    "org.telegram.tgnet.TLRPC$TL_updateNewMessage",
+)
+TL_MESSAGE_SERVICE_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_messageService",
+    "org.telegram.tgnet.TLRPC$TL_message",
+)
+TL_ACTION_UNIQUE_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_messageActionStarGiftUnique",
+    "org.telegram.tgnet.tl.TL_stars$TL_messageActionStarGiftUnique",
+)
+TL_PAYMENT_FORM_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_payments_paymentFormStarGift",
+    "org.telegram.tgnet.tl.TL_stars$TL_paymentFormStarGift",
+    "org.telegram.tgnet.tl.TL_stars$TL_payments_paymentFormStarGift",
+    "org.telegram.tgnet.TLRPC$TL_payments_paymentFormStars",
+    "org.telegram.tgnet.TLRPC$TL_payments_paymentForm",
+)
+TL_PAYMENT_RESULT_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_payments_paymentResult",
+    "org.telegram.tgnet.tl.TL_stars$TL_payments_paymentResult",
+)
+TL_INVOICE_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_invoice",
+)
+TL_ERROR_NAMES = (
+    "org.telegram.tgnet.TLRPC$TL_error",
 )
 
 UNIQUE_MODELS = (
@@ -410,6 +443,10 @@ class LocalSnosPlugin(BasePlugin):
         self._unique_attr_refs: Dict[str, Any] = {}
         self._picker_gifts: List[Any] = []
         self._gift_count_bump = 0
+        self._live_gift_sheets: List[Any] = []
+        self._suppress_gift_error = 0
+        self._local_upgrade_tokens: Set[int] = set()
+        self._serving_upgrade = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -426,7 +463,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.4 loaded")
+        self.log("Local Snos 1.1.5 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -2233,6 +2270,18 @@ class LocalSnosPlugin(BasePlugin):
                 rec = self._local_record_from_obj(request)
                 if rec is None:
                     return HookResult()
+                name = _as_str(request_name).lower()
+                # Native StarGiftSheet needs getPaymentForm / upgradeStarGift
+                # to succeed so it can roll model/backdrop. Fake those in
+                # ConnectionsManager.sendRequest instead of cancelling here.
+                if (
+                    "upgrade" in name
+                    or "paymentform" in name
+                    or "payment_form" in name
+                    or "starsform" in name
+                    or "sendstarsform" in name
+                ):
+                    return HookResult()
                 self._on_blocked_local_request(request_name, rec)
                 return HookResult(strategy=HookStrategy.CANCEL)
         except Exception:
@@ -2338,7 +2387,8 @@ class LocalSnosPlugin(BasePlugin):
         if not rec.get("upgraded"):
             flags |= SAVED_FLAG_CAN_UPGRADE | SAVED_FLAG_UPGRADE_STARS
             self._set_field(saved, "can_upgrade", True)
-            self._set_field(saved, "upgrade_stars", 1)
+            if not self._set_field(saved, "upgrade_stars", _jlong(25)):
+                self._set_field(saved, "upgrade_stars", 25)
         else:
             self._set_field(saved, "can_upgrade", False)
 
@@ -2472,25 +2522,11 @@ class LocalSnosPlugin(BasePlugin):
         if self._blocking_local:
             return
         self._blocking_local = True
+        self._suppress_gift_error += 1
 
         def _ui() -> None:
             self._blocking_local = False
-            name = _as_str(request_name).lower()
-            gift_id = _as_str(rec.get("id") or "")
-            live = self._gift_by_id(gift_id)
-            if live is not None and not live.get("upgraded"):
-                if (
-                    "upgrade" in name
-                    or "paymentform" in name
-                    or "payment_form" in name
-                    or "starsform" in name
-                    or "sendstarsform" in name
-                ):
-                    self._upgrade_local_gift(gift_id)
-                    return
-            if live is not None and live.get("upgraded") and "upgrade" in name:
-                self._toast_info("Локальный подарок уже коллекционный")
-                return
+            self._suppress_gift_error = max(0, self._suppress_gift_error - 1)
             self._toast_error("Локальный подарок нельзя продать, передать или вывести")
 
         run_on_ui_thread(_ui)
@@ -2499,14 +2535,23 @@ class LocalSnosPlugin(BasePlugin):
         for class_name in GIFT_SHEET_CLASSES:
             self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
             self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
-            for method_name in (
-                "upgradeGift",
-                "upgrade",
-                "doUpgrade",
-                "openUpgrade",
-                "onUpgrade",
-            ):
-                self._hook_all(class_name, method_name, before=self._before_sheet_upgrade)
+            self._hook_all(class_name, "set", after=self._after_gift_sheet_set)
+        self._hook_all(
+            "org.telegram.tgnet.ConnectionsManager",
+            "sendRequest",
+            before=self._before_send_request,
+        )
+        self._hook_all(
+            "org.telegram.messenger.MessagesController",
+            "processUpdates",
+            before=self._before_process_updates,
+        )
+        for class_name in (
+            "org.telegram.ui.Components.BulletinFactory",
+            "org.telegram.ui.Components.Bulletin",
+        ):
+            for method_name in ("showForError", "showError"):
+                self._hook_all(class_name, method_name, before=self._before_error_bulletin)
 
     def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
         cls = find_class(class_name)
@@ -2526,6 +2571,12 @@ class LocalSnosPlugin(BasePlugin):
 
     def _after_gift_sheet_ctor(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
+        if sheet is None:
+            return
+        if sheet not in self._live_gift_sheets:
+            self._live_gift_sheets.append(sheet)
+            if len(self._live_gift_sheets) > 8:
+                self._live_gift_sheets = self._live_gift_sheets[-8:]
         rec = self._local_from_sheet(sheet, getattr(param, "args", None))
         if rec is None:
             return
@@ -2533,27 +2584,52 @@ class LocalSnosPlugin(BasePlugin):
             setattr(sheet, "_local_snos_gift", rec.get("id"))
         except Exception:
             pass
+        self._prepare_local_sheet(sheet, rec)
 
-    def _before_gift_sheet_show(self, param: Any) -> None:
-        # Let Telegram draw the real StarGiftSheet (upgrade button included).
-        # Local upgrade is handled by cancelling getPaymentForm / upgradeStarGift.
-        return
-
-    def _before_sheet_upgrade(self, param: Any) -> None:
+    def _after_gift_sheet_set(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
         rec = self._local_from_sheet(sheet, getattr(param, "args", None))
         if rec is None:
-            marker = getattr(sheet, "_local_snos_gift", None) if sheet is not None else None
-            if marker:
-                rec = self._gift_by_id(_as_str(marker))
-        if rec is None:
             return
         try:
-            param.setResult(None)
+            setattr(sheet, "_local_snos_gift", rec.get("id"))
         except Exception:
             pass
-        gift_id = _as_str(rec.get("id") or "")
-        run_on_ui_thread(lambda: self._upgrade_local_gift(gift_id), 10)
+        self._prepare_local_sheet(sheet, rec)
+
+    def _prepare_local_sheet(self, sheet: Any, rec: Optional[Dict[str, Any]] = None) -> None:
+        if sheet is None:
+            return
+        if rec is None:
+            rec = self._local_from_sheet(sheet, None)
+        if rec is None or rec.get("upgraded"):
+            return
+        saved = None
+        for name in ("savedStarGift", "saved_gift", "gift"):
+            try:
+                saved = get_private_field(sheet, name)
+            except Exception:
+                saved = getattr(sheet, name, None)
+            if saved is not None and hasattr(saved, "upgrade_stars"):
+                break
+        if saved is None:
+            return
+        # Prepaid path: StarGiftSheet skips getPaymentForm and later
+        # calls payments.upgradeStarGift, which we fake as success.
+        self._set_field(saved, "can_upgrade", True)
+        if not self._set_field(saved, "upgrade_stars", _jlong(25)):
+            self._set_field(saved, "upgrade_stars", 25)
+        flags = _as_int(getattr(saved, "flags", 0))
+        flags |= SAVED_FLAG_CAN_UPGRADE | SAVED_FLAG_UPGRADE_STARS | SAVED_FLAG_MSG_ID
+        flags &= ~SAVED_FLAG_SAVED_ID
+        self._set_field(saved, "flags", flags)
+
+    def _before_gift_sheet_show(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._local_from_sheet(sheet, getattr(param, "args", None))
+        if rec is not None:
+            self._prepare_local_sheet(sheet, rec)
+        return
 
     def _local_from_sheet(self, sheet: Any, args: Any) -> Optional[Dict[str, Any]]:
         if sheet is not None:
@@ -2583,6 +2659,311 @@ class LocalSnosPlugin(BasePlugin):
                 if rec is not None:
                     return rec
         return None
+
+    def _before_send_request(self, param: Any) -> None:
+        if not self._gifts:
+            return
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        request = args[0]
+        name = _class_name(request).lower()
+        if not name:
+            return
+        if (
+            "stargift" not in name
+            and "paymentform" not in name
+            and "payment_form" not in name
+            and "starsform" not in name
+        ):
+            return
+        if "preview" in name or "getstargifts" in name or "getsaved" in name:
+            return
+        rec = self._local_record_from_obj(request)
+        if rec is None:
+            return
+        gift_id = _as_str(rec.get("id") or "")
+        live = self._gift_by_id(gift_id)
+        is_upgrade = (
+            "upgrade" in name
+            or "paymentform" in name
+            or "payment_form" in name
+            or "starsform" in name
+        )
+        if not is_upgrade:
+            return
+        callback = self._request_callback(args)
+        try:
+            param.setResult(0)
+        except Exception:
+            try:
+                param.setResult(_jint(0))
+            except Exception:
+                try:
+                    param.setResult(None)
+                except Exception:
+                    pass
+        if "paymentform" in name or "payment_form" in name:
+            form = self._fake_payment_form()
+            if form is not None:
+                self._invoke_request_callback(callback, form, None)
+            else:
+                self._nudge_open_upgrade()
+            return
+        if live is None:
+            return
+        wrap_payment = "starsform" in name or "sendstarsform" in name or "sendpaymentform" in name
+        if live.get("upgraded"):
+            unique_obj = self._build_unique_gift(
+                live, self._catalog_by_id.get(_as_int(live.get("gift_id")))
+            )
+            payload = self._build_upgrade_payload(live, unique_obj, wrap_payment)
+            if payload is not None:
+                self._invoke_request_callback(callback, payload, None)
+            return
+        self._serve_local_upgrade(live, callback, wrap_payment=wrap_payment)
+
+    def _request_callback(self, args: Any) -> Any:
+        for arg in list(args or [])[1:]:
+            if arg is None or isinstance(arg, (str, int, float, bool)):
+                continue
+            run = getattr(arg, "run", None)
+            if callable(run):
+                return arg
+        return None
+
+    def _invoke_request_callback(self, callback: Any, response: Any, error: Any) -> None:
+        if callback is None:
+            return
+
+        def _run() -> None:
+            try:
+                callback.run(response, error)
+                return
+            except TypeError:
+                pass
+            except Exception:
+                _safe_log(f"request callback failed:\n{_format_exc()}")
+                return
+            try:
+                callback.run(response, error, 0)
+            except Exception:
+                _safe_log(f"request callback(ts) failed:\n{_format_exc()}")
+
+        run_on_ui_thread(_run, 50)
+
+    def _nudge_open_upgrade(self) -> None:
+        def _ui() -> None:
+            for sheet in list(reversed(self._live_gift_sheets)):
+                rec = self._local_from_sheet(sheet, None)
+                if rec is None:
+                    continue
+                self._prepare_local_sheet(sheet, rec)
+                method = getattr(sheet, "openUpgradeAfter", None)
+                if callable(method):
+                    try:
+                        method()
+                        return
+                    except Exception:
+                        _safe_log(f"openUpgradeAfter failed:\n{_format_exc()}")
+
+        run_on_ui_thread(_ui, 80)
+
+    def _serve_local_upgrade(self, rec: Dict[str, Any], callback: Any, wrap_payment: bool = False) -> None:
+        if self._serving_upgrade:
+            return
+        self._serving_upgrade = True
+        gift_id = _as_str(rec.get("id") or "")
+
+        def _finish(meta: Dict[str, Any], attrs: Any = None) -> None:
+            self._serving_upgrade = False
+            live = self._gift_by_id(gift_id)
+            if live is None:
+                return
+            if meta:
+                live["unique"] = meta
+            live["upgraded"] = True
+            live["upgraded_at"] = int(time.time())
+            if attrs is not None:
+                self._unique_attr_refs[str(live.get("id"))] = attrs
+            catalog = self._catalog_by_id.get(_as_int(live.get("gift_id")))
+            if attrs is None:
+                attrs = self._synthetic_unique_attrs(live, catalog)
+                if attrs is not None:
+                    self._unique_attr_refs[str(live.get("id"))] = attrs
+            self._persist_gifts()
+            unique_obj = self._build_unique_gift(live, catalog)
+            payload = self._build_upgrade_payload(live, unique_obj, wrap_payment)
+            if payload is None:
+                self._suppress_gift_error += 1
+                self._upgrade_local_gift(gift_id)
+                run_on_ui_thread(
+                    lambda: setattr(self, "_suppress_gift_error", max(0, self._suppress_gift_error - 1)),
+                    800,
+                )
+                return
+            self._invoke_request_callback(callback, payload, None)
+            run_on_ui_thread(self._refresh_gifts_ui, 1800)
+
+        sheet_samples = self._sheet_sample_attributes()
+        if sheet_samples:
+            fallback = rec.get("unique") or self._roll_unique(rec)
+            meta, attrs = self._unique_from_preview(rec, type("P", (), {"sample_attributes": sheet_samples})(), fallback)
+            _finish(meta, attrs)
+            return
+        try:
+            self._fetch_upgrade_preview(rec, _finish)
+        except Exception:
+            _safe_log(f"serve upgrade preview failed:\n{_format_exc()}")
+            _finish(self._roll_unique(rec), None)
+
+    def _fake_payment_form(self) -> Any:
+        form = self._new_tl(TL_PAYMENT_FORM_NAMES)
+        if form is None:
+            return None
+        invoice = self._new_tl(TL_INVOICE_NAMES)
+        if invoice is not None:
+            self._set_field(invoice, "currency", "XTR")
+            prices = _new_java_list()
+            self._set_field(invoice, "prices", prices)
+            self._set_field(form, "invoice", invoice)
+        form_id = 9_000_000_000_000 + random.randint(1, 999_999)
+        if not self._set_field(form, "form_id", _jlong(form_id)):
+            self._set_field(form, "form_id", form_id)
+        self._set_field(form, "title", "Upgrade")
+        self._set_field(form, "description", " ")
+        self._set_field(form, "users", _new_java_list())
+        self._set_field(form, "bot_id", 777000)
+        if TLRPC is not None:
+            try:
+                if not isinstance(form, TLRPC.PaymentForm):
+                    return None
+            except Exception:
+                pass
+        return form
+
+    def _sheet_sample_attributes(self) -> Any:
+        for sheet in list(reversed(self._live_gift_sheets)):
+            for name in ("sample_attributes", "sampleAttributes"):
+                try:
+                    value = get_private_field(sheet, name)
+                except Exception:
+                    value = getattr(sheet, name, None)
+                if value is not None and _java_list(value):
+                    return value
+        return None
+
+    def _build_upgrade_payload(self, rec: Dict[str, Any], unique_obj: Any, wrap_payment: bool) -> Any:
+        updates = self._build_upgrade_updates(rec, unique_obj)
+        if updates is None or not wrap_payment:
+            return updates
+        result = self._new_tl(TL_PAYMENT_RESULT_NAMES)
+        if result is None:
+            return updates
+        self._set_field(result, "updates", updates)
+        return result
+
+    def _build_upgrade_updates(self, rec: Dict[str, Any], unique_obj: Any) -> Any:
+        if unique_obj is None:
+            return None
+        updates = self._new_tl(TL_UPDATES_NAMES)
+        if updates is None and TLRPC is not None:
+            ctor = getattr(TLRPC, "TL_updates", None)
+            if callable(ctor):
+                try:
+                    updates = ctor()
+                except Exception:
+                    updates = None
+        if updates is None:
+            return None
+        action = self._new_tl(TL_ACTION_UNIQUE_NAMES)
+        if action is None and TLRPC is not None:
+            ctor = getattr(TLRPC, "TL_messageActionStarGiftUnique", None)
+            if callable(ctor):
+                try:
+                    action = ctor()
+                except Exception:
+                    action = None
+        if action is None:
+            return None
+        self._set_field(action, "gift", unique_obj)
+        self._set_field(action, "saved", True)
+        self._set_field(action, "refunded", False)
+        far = int(time.time()) + 10 * 365 * 24 * 3600
+        self._set_field(action, "can_export_at", far)
+        self._set_field(action, "can_transfer_at", far)
+        self._set_field(action, "can_resell_at", far)
+        flags = _as_int(getattr(action, "flags", 0))
+        flags |= 4  # saved
+        self._set_field(action, "flags", flags)
+        peer = self._self_peer()
+        if peer is not None:
+            self._set_field(action, "from_id", peer)
+            self._set_field(action, "peer", peer)
+        message = self._new_tl(TL_MESSAGE_SERVICE_NAMES)
+        if message is None:
+            return None
+        msg_id = _as_int(rec.get("msg_id"))
+        self._set_field(message, "id", msg_id)
+        self._set_field(message, "date", int(time.time()))
+        self._set_field(message, "action", action)
+        if peer is not None:
+            self._set_field(message, "from_id", peer)
+            self._set_field(message, "peer_id", peer)
+        self._set_field(message, "out", True)
+        self._set_field(message, "local_id", msg_id)
+        upd = self._new_tl(TL_UPDATE_NEW_MSG_NAMES)
+        if upd is None:
+            return None
+        self._set_field(upd, "message", message)
+        self._set_field(upd, "pts", 0)
+        self._set_field(upd, "pts_count", 0)
+        bucket = _new_java_list()
+        try:
+            bucket.add(upd)
+        except Exception:
+            return None
+        self._set_field(updates, "updates", bucket)
+        self._set_field(updates, "users", _new_java_list())
+        self._set_field(updates, "chats", _new_java_list())
+        self._set_field(updates, "date", int(time.time()))
+        self._set_field(updates, "seq", 0)
+        try:
+            setattr(updates, "_local_snos_upgrade", True)
+        except Exception:
+            pass
+        ident = id(updates)
+        self._local_upgrade_tokens.add(ident)
+        if len(self._local_upgrade_tokens) > 32:
+            self._local_upgrade_tokens = set(list(self._local_upgrade_tokens)[-16:])
+        return updates
+
+    def _before_process_updates(self, param: Any) -> None:
+        args = getattr(param, "args", None)
+        if not args:
+            return
+        updates = args[0]
+        if updates is None:
+            return
+        if getattr(updates, "_local_snos_upgrade", False) or id(updates) in self._local_upgrade_tokens:
+            try:
+                param.setResult(None)
+            except Exception:
+                pass
+            return
+        rec = self._local_record_from_obj(updates)
+        if rec is not None:
+            try:
+                param.setResult(None)
+            except Exception:
+                pass
+
+    def _before_error_bulletin(self, param: Any) -> None:
+        if self._suppress_gift_error > 0:
+            try:
+                param.setResult(None)
+            except Exception:
+                pass
 
     def _before_post_notification(self, param: Any) -> None:
         if not self._gifts_enabled() or not self._gifts:
