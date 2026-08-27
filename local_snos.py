@@ -176,7 +176,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -597,6 +597,9 @@ class LocalSnosPlugin(BasePlugin):
         self._suppress_gift_error = 0
         self._local_upgrade_tokens: Set[int] = set()
         self._serving_upgrade = False
+        self._snow_icon = None
+        self._preview_samples: Dict[int, Any] = {}
+        self._status_ui_lock = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -623,7 +626,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.3.2 loaded")
+        self.log("Local Snos 1.3.3 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -1321,7 +1324,10 @@ class LocalSnosPlugin(BasePlugin):
             self._set_bool(user, "verified", False)
             self._set_bool(user, "min", False)
             self._set_field(user, "photo", self._empty_photo())
-            self._set_field(user, "emoji_status", None)
+            # Keep a snowflake emoji-status if we can build one; otherwise
+            # the avatar custom icon + subtitle carry the frozen look.
+            snow = self._snowflake_emoji_status()
+            self._set_field(user, "emoji_status", snow)
             self._set_field(user, "color", None)
             self._set_field(user, "profile_color", None)
 
@@ -1351,9 +1357,7 @@ class LocalSnosPlugin(BasePlugin):
     def _mutate_user_full(self, user_full: Any) -> None:
         if user_full is None:
             return
-        # Frozen text is NOT the bio. Deleted/frozen profiles hide "О себе".
-        # Keep about empty so Telegram does not render a description row.
-        self._set_field(user_full, "about", "")
+        self._set_field(user_full, "about", self._frozen_bio())
         for field in ("profile_photo", "personal_photo", "fallback_photo"):
             if hasattr(user_full, field):
                 self._set_field(user_full, field, None)
@@ -1564,6 +1568,9 @@ class LocalSnosPlugin(BasePlugin):
                 user_id = None
         if user_id in self._snos_ids:
             self._set_bool(target, "drawDeleted", True)
+            self._apply_avatar_snowflake(target, True)
+        else:
+            self._apply_avatar_snowflake(target, False)
 
     def _before_put_users_and_chats(self, param: Any) -> None:
         if not self._snos_ids:
@@ -1686,6 +1693,147 @@ class LocalSnosPlugin(BasePlugin):
             pass
         return ""
 
+    def _snowflake_drawable(self) -> Any:
+        if self._snow_icon is not None:
+            return self._snow_icon
+        try:
+            from org.telegram.messenger import Emoji
+
+            for emoji in ("❄️", "\u2744\ufe0f", "\u2744"):
+                for method_name in ("getEmojiDrawable", "getEmojiBigDrawable"):
+                    method = getattr(Emoji, method_name, None)
+                    if not callable(method):
+                        continue
+                    try:
+                        icon = method(emoji)
+                    except Exception:
+                        icon = None
+                    if icon is not None:
+                        self._snow_icon = icon
+                        return icon
+        except Exception:
+            pass
+        try:
+            from org.telegram.messenger import ApplicationLoader, R
+            from androidx.core.content import ContextCompat
+
+            ctx = getattr(ApplicationLoader, "applicationContext", None)
+            if ctx is not None:
+                for attr in ("msg_offline", "filled_button_pause", "msg_recent"):
+                    res_id = getattr(getattr(R, "drawable", None), attr, None)
+                    if res_id is None:
+                        continue
+                    try:
+                        icon = ContextCompat.getDrawable(ctx, int(res_id))
+                    except Exception:
+                        icon = None
+                    if icon is not None:
+                        self._snow_icon = icon
+                        return icon
+        except Exception:
+            pass
+        return None
+
+    def _snowflake_emoji_status(self) -> Any:
+        # No cached custom-emoji document_id: an empty TL_emojiStatus would
+        # crash SimpleTextView. Snowflake is drawn on the avatar + title.
+        return None
+
+    def _apply_avatar_snowflake(self, target: Any, enabled: bool) -> None:
+        if target is None:
+            return
+        icon = self._snowflake_drawable() if enabled else None
+        method = getattr(target, "setCustomIcon", None)
+        if callable(method):
+            try:
+                method(icon)
+            except Exception:
+                pass
+        else:
+            try:
+                set_private_field(target, "customIconDrawable", icon)
+            except Exception:
+                pass
+        if enabled:
+            self._set_bool(target, "drawDeleted", True)
+        try:
+            target.invalidateSelf()
+        except Exception:
+            pass
+
+    def _apply_frozen_status_ui(self, fragment: Any, avatar: Any = None) -> None:
+        if fragment is None or self._status_ui_lock:
+            return
+        self._status_ui_lock = True
+        try:
+            self._apply_frozen_status_ui_inner(fragment, avatar)
+        finally:
+            self._status_ui_lock = False
+
+    def _apply_frozen_status_ui_inner(self, fragment: Any, avatar: Any = None) -> None:
+        text = self._frozen_bio()
+        icon = self._snowflake_drawable()
+        if avatar is None:
+            try:
+                avatar = get_private_field(fragment, "avatarContainer")
+            except Exception:
+                avatar = getattr(fragment, "avatarContainer", None)
+        if avatar is not None:
+            for method_name, args in (
+                ("setSubtitle", (text,)),
+                ("setSubtitle", (text, True)),
+            ):
+                method = getattr(avatar, method_name, None)
+                if callable(method):
+                    try:
+                        method(*args)
+                        break
+                    except Exception:
+                        continue
+            title = None
+            try:
+                title = get_private_field(avatar, "titleTextView")
+            except Exception:
+                title = getattr(avatar, "titleTextView", None)
+            self._set_right_drawable(title, icon)
+        for field, as_status in (("nameTextView", False), ("onlineTextView", True)):
+            views = None
+            try:
+                views = get_private_field(fragment, field)
+            except Exception:
+                views = getattr(fragment, field, None)
+            if views is None:
+                continue
+            try:
+                iterable = list(views)
+            except Exception:
+                iterable = [views]
+            for view in iterable:
+                if view is None:
+                    continue
+                if as_status:
+                    setter = getattr(view, "setText", None)
+                    if callable(setter):
+                        try:
+                            setter(text)
+                        except Exception:
+                            pass
+                else:
+                    self._set_right_drawable(view, icon)
+
+    def _set_right_drawable(self, view: Any, icon: Any) -> None:
+        if view is None or icon is None:
+            return
+        method = getattr(view, "setRightDrawable", None)
+        if not callable(method):
+            return
+        for args in ((icon,), (icon, True), (icon, True, True)):
+            try:
+                method(*args)
+                return
+            except Exception:
+                continue
+
     def _commit_user(self, account: int, user: Any) -> None:
         # Never call MessagesController.putUser from the plugin.
         # It re-enters putUser/getUser hooks and crashes the client.
@@ -1727,29 +1875,31 @@ class LocalSnosPlugin(BasePlugin):
             except Exception:
                 target = getattr(fragment, name, None)
             self._call_set_info(target, user)
+            self._apply_avatar_snowflake(target, True)
         avatar = getattr(fragment, "avatarContainer", None)
         if avatar is None:
             try:
                 avatar = get_private_field(fragment, "avatarContainer")
             except Exception:
                 avatar = None
-        if avatar is None:
-            return
-        self._call_set_info(avatar, user)
-        for name in ("avatarDrawable", "avatarImageView"):
-            child = None
-            try:
-                child = get_private_field(avatar, name)
-            except Exception:
-                child = getattr(avatar, name, None)
-            self._call_set_info(child, user)
-        for name in ("checkAndUpdateAvatar", "updateAvatar"):
-            method = getattr(avatar, name, None)
-            if callable(method):
+        if avatar is not None:
+            self._call_set_info(avatar, user)
+            for name in ("avatarDrawable", "avatarImageView"):
+                child = None
                 try:
-                    method()
+                    child = get_private_field(avatar, name)
                 except Exception:
-                    continue
+                    child = getattr(avatar, name, None)
+                self._call_set_info(child, user)
+                self._apply_avatar_snowflake(child, True)
+            for name in ("checkAndUpdateAvatar", "updateAvatar"):
+                method = getattr(avatar, name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        continue
+        self._apply_frozen_status_ui(fragment, avatar)
 
     def _call_set_info(self, obj: Any, user: Any) -> None:
         if obj is None or user is None:
@@ -2278,6 +2428,10 @@ class LocalSnosPlugin(BasePlugin):
         self._catalog_by_id[gift_id] = catalog_gift
         self._gifts.append(rec)
         try:
+            self._prefetch_unique_preview(gift_id)
+        except Exception:
+            pass
+        try:
             self._persist_gifts(reload_settings=False)
         except Exception:
             _safe_log(f"persist after add failed:\n{_format_exc()}")
@@ -2473,7 +2627,15 @@ class LocalSnosPlugin(BasePlugin):
     def _prefetch_catalog(self) -> None:
         if not self._gifts_enabled():
             return
-        self._ensure_catalog(self._selected_account(), lambda _ok, _err: None)
+
+        def _after(ok: bool, _err: Optional[str]) -> None:
+            if ok and self._gifts:
+                try:
+                    self._refresh_gifts_ui()
+                except Exception:
+                    _safe_log(f"refresh after catalog failed:\n{_format_exc()}")
+
+        self._ensure_catalog(self._selected_account(), _after)
 
     def _ingest_catalog(self, gifts: Any) -> int:
         added = 0
@@ -2779,9 +2941,9 @@ class LocalSnosPlugin(BasePlugin):
         if rec.get("upgraded"):
             gift_obj = self._build_unique_gift(rec, catalog)
         else:
-            gift_obj = self._clone_star_gift(catalog)
-            if gift_obj is None:
-                gift_obj = catalog
+            # Keep the catalog Java object so the TGS/Lottie sticker animates.
+            # Do not mutate it — unique gifts are built separately.
+            gift_obj = catalog
         if gift_obj is None:
             return None
 
@@ -2831,7 +2993,21 @@ class LocalSnosPlugin(BasePlugin):
         rec_id = str(rec.get("id"))
         attrs = self._unique_attr_refs.get(rec_id)
         if attrs is None or not _java_list(attrs):
-            attrs = self._synthetic_unique_attrs(rec, catalog)
+            samples = self._preview_samples.get(_as_int(rec.get("gift_id")))
+            if samples:
+                try:
+                    meta2, picked = self._unique_from_preview(
+                        rec, type("P", (), {"sample_attributes": samples})(), rec.get("unique") or {}
+                    )
+                    if meta2:
+                        rec["unique"] = meta2
+                        meta = rec["unique"]
+                    if picked is not None and _java_list(picked):
+                        attrs = picked
+                except Exception:
+                    attrs = None
+            if attrs is None or not _java_list(attrs):
+                attrs = self._synthetic_unique_attrs(rec, catalog)
             if attrs is not None:
                 self._unique_attr_refs[rec_id] = attrs
         if attrs is None:
@@ -3229,6 +3405,21 @@ class LocalSnosPlugin(BasePlugin):
 
         self._send_req(req, _done, self._selected_account())
 
+    def _prefetch_unique_preview(self, gift_id: int) -> None:
+        if gift_id <= 0 or gift_id in self._preview_samples:
+            return
+
+        def _store(preview: Any) -> None:
+            samples = None
+            if preview is not None:
+                samples = getattr(preview, "sample_attributes", None) or getattr(preview, "attributes", None)
+            if samples is not None and _java_list(samples):
+                self._preview_samples[gift_id] = samples
+
+        if not self._native_gift_preview(gift_id, _store):
+            rec = {"gift_id": gift_id, "id": str(gift_id)}
+            self._fetch_preview_samples(rec, lambda samples: self._preview_samples.__setitem__(gift_id, samples) if samples is not None else None)
+
     def _before_do_upgrade(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
         rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
@@ -3326,6 +3517,8 @@ class LocalSnosPlugin(BasePlugin):
             meta = rec.get("unique") or self._roll_unique(rec)
             attrs = None
             samples = self._sheet_sample_attributes(sheet)
+            if not samples:
+                samples = self._preview_samples.get(_as_int(rec.get("gift_id")))
             if samples:
                 try:
                     meta, attrs = self._unique_from_preview(
@@ -4043,7 +4236,7 @@ class LocalSnosPlugin(BasePlugin):
             self._set_field(model, "name", _as_str(meta.get("model") or "Model"))
             rarity = int(float(meta.get("model_rarity") or 1.0) * 10)
             self._set_int(model, "rarity_permille", rarity)
-            sticker = getattr(catalog, "sticker", None) if catalog is not None else None
+            sticker = self._gift_document(catalog)
             if sticker is not None:
                 self._set_field(model, "document", sticker)
             try:
@@ -4056,9 +4249,6 @@ class LocalSnosPlugin(BasePlugin):
             self._set_field(pattern, "name", _as_str(meta.get("pattern") or "Pattern"))
             rarity = int(float(meta.get("pattern_rarity") or 2.0) * 10)
             self._set_int(pattern, "rarity_permille", rarity)
-            sticker = getattr(catalog, "sticker", None) if catalog is not None else None
-            if sticker is not None:
-                self._set_field(pattern, "document", sticker)
             try:
                 attrs.add(pattern)
                 added += 1
