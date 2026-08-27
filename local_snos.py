@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.7"
+__version__ = "1.1.8"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -467,16 +467,26 @@ class LocalSnosPlugin(BasePlugin):
 
     def on_plugin_load(self) -> None:
         self._reload_store()
-        self._reload_gifts()
+        try:
+            self._reload_gifts()
+        except Exception:
+            self._gifts = []
+            _safe_log(f"reload gifts failed:\n{_format_exc()}")
         self._install_java_hooks()
-        self._install_gift_java_hooks()
-        self._install_request_hooks()
+        try:
+            self._install_gift_java_hooks()
+        except Exception:
+            _safe_log(f"gift java hooks failed:\n{_format_exc()}")
+        try:
+            self._install_request_hooks()
+        except Exception:
+            _safe_log(f"request hooks failed:\n{_format_exc()}")
         self._install_menus()
         try:
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.7 loaded")
+        self.log("Local Snos 1.1.8 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -1364,7 +1374,8 @@ class LocalSnosPlugin(BasePlugin):
         result = param.getResult()
         if self._snos_ids:
             self._maybe_touch_user_full(result)
-        self._maybe_bump_gifts_count(result)
+        # Do not mutate UserFull on every getUserFull — that runs at
+        # startup and a bad boxed int crashes the whole client.
 
     def _after_avatar_set_info(self, param: Any) -> None:
         if not self._feature_enabled() or not self._snos_ids:
@@ -1916,8 +1927,14 @@ class LocalSnosPlugin(BasePlugin):
         rec["slug"] = LOCAL_SLUG_PREFIX + rec["id"]
         self._catalog_by_id[gift_id] = catalog_gift
         self._gifts.append(rec)
-        self._persist_gifts(reload_settings=True)
-        self._refresh_gifts_ui()
+        try:
+            self._persist_gifts(reload_settings=False)
+        except Exception:
+            _safe_log(f"persist after add failed:\n{_format_exc()}")
+        try:
+            self._refresh_gifts_ui()
+        except Exception:
+            _safe_log(f"refresh after add failed:\n{_format_exc()}")
         self._toast_success(f"{self._gift_title(rec)} на профиле. Тапни подарок → Улучшить")
         if again:
             run_on_ui_thread(self._show_catalog_categories, 280)
@@ -2210,7 +2227,7 @@ class LocalSnosPlugin(BasePlugin):
             return
         try:
             if hasattr(req, "hash"):
-                self._set_field(req, "hash", 0)
+                self._set_long(req, "hash", 0)
         except Exception:
             pass
         self._catalog_loading = True
@@ -2243,16 +2260,8 @@ class LocalSnosPlugin(BasePlugin):
         names.append("getStarGiftUpgradePreview")
         for name in names:
             self._add_req_hook(name)
-        self._hook_all(
-            "org.telegram.messenger.NotificationCenter",
-            "postNotificationName",
-            before=self._before_post_notification,
-        )
-        self._hook_all(
-            "org.telegram.messenger.NotificationCenter",
-            "postNotificationNameOnUIThread",
-            before=self._before_post_notification,
-        )
+        # Do not hook NotificationCenter: injecting during notifyUpdate
+        # re-enters the list while the adapter is binding and crashes.
 
     def _add_req_hook(self, name: str) -> None:
         try:
@@ -2370,7 +2379,7 @@ class LocalSnosPlugin(BasePlugin):
             reported = server
         # Strip previously injected extras from server-reported count.
         extra = len(built)
-        self._set_field(response, "count", reported - (len(current) - server) + extra)
+        self._set_int(response, "count", reported - (len(current) - server) + extra)
         return True
 
     def _built_local_saved(self) -> List[Any]:
@@ -2399,18 +2408,17 @@ class LocalSnosPlugin(BasePlugin):
         flags = SAVED_FLAG_FROM_ID | SAVED_FLAG_MSG_ID | SAVED_FLAG_PINNED
         if not rec.get("upgraded"):
             flags |= SAVED_FLAG_CAN_UPGRADE | SAVED_FLAG_UPGRADE_STARS
-            self._set_field(saved, "can_upgrade", True)
-            if not self._set_field(saved, "upgrade_stars", _jlong(25)):
-                self._set_field(saved, "upgrade_stars", 25)
+            self._set_bool(saved, "can_upgrade", True)
+            self._set_long(saved, "upgrade_stars", 25)
         else:
-            self._set_field(saved, "can_upgrade", False)
+            self._set_bool(saved, "can_upgrade", False)
 
-        self._set_field(saved, "flags", flags)
-        self._set_field(saved, "unsaved", False)
-        self._set_field(saved, "pinned_to_top", True)
-        self._set_field(saved, "name_hidden", False)
-        self._set_field(saved, "date", _as_int(rec.get("added_at"), int(time.time())))
-        self._set_field(saved, "msg_id", _as_int(rec.get("msg_id")))
+        self._set_int(saved, "flags", flags)
+        self._set_bool(saved, "unsaved", False)
+        self._set_bool(saved, "pinned_to_top", True)
+        self._set_bool(saved, "name_hidden", False)
+        self._set_int(saved, "date", _as_int(rec.get("added_at"), int(time.time())))
+        self._set_int(saved, "msg_id", _as_int(rec.get("msg_id")))
         self._set_field(saved, "gift", gift_obj)
         peer = self._self_peer()
         if peer is not None:
@@ -2423,19 +2431,19 @@ class LocalSnosPlugin(BasePlugin):
             return catalog
         meta = rec.get("unique") or {}
         unique_id = 9_000_000_000_000 + (_as_int(rec.get("msg_id")) % 1_000_000_000)
-        self._set_field(unique, "id", unique_id)
-        self._set_field(unique, "gift_id", _as_int(rec.get("gift_id")))
+        self._set_long(unique, "id", unique_id)
+        self._set_long(unique, "gift_id", _as_int(rec.get("gift_id")))
         self._set_field(unique, "title", _as_str(meta.get("title") or rec.get("title") or "Collectible"))
         self._set_field(unique, "slug", _as_str(meta.get("slug") or rec.get("slug")))
-        self._set_field(unique, "num", _as_int(meta.get("num"), 1))
-        self._set_field(unique, "availability_issued", _as_int(meta.get("issued"), 1))
-        self._set_field(unique, "availability_total", _as_int(meta.get("total"), 50000))
+        self._set_int(unique, "num", _as_int(meta.get("num"), 1))
+        self._set_int(unique, "availability_issued", _as_int(meta.get("issued"), 1))
+        self._set_int(unique, "availability_total", _as_int(meta.get("total"), 50000))
         peer = self._self_peer()
         if peer is not None:
             self._set_field(unique, "owner_id", peer)
             flags = _as_int(getattr(unique, "flags", 0))
             flags |= 1
-            self._set_field(unique, "flags", flags)
+            self._set_int(unique, "flags", flags)
         attrs = self._unique_attr_refs.get(str(rec.get("id")))
         if attrs is None or not _java_list(attrs):
             attrs = self._synthetic_unique_attrs(rec, catalog)
@@ -2467,7 +2475,7 @@ class LocalSnosPlugin(BasePlugin):
                     peer = None
         if peer is None:
             return None
-        self._set_field(peer, "user_id", user_id)
+        self._set_long(peer, "user_id", user_id)
         return peer
 
     def _local_record_from_obj(self, obj: Any) -> Optional[Dict[str, Any]]:
@@ -2548,10 +2556,8 @@ class LocalSnosPlugin(BasePlugin):
         for class_name in GIFT_SHEET_CLASSES:
             self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
             self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
-            self._hook_all(class_name, "set", after=self._after_gift_sheet_set)
+            # Never hook all "set" overloads — too broad, crashes on bind.
             # doUpgrade is void — setResult(None) is safe.
-            # Never hook ConnectionsManager.sendRequest: it returns int and
-            # Python/Chaquopy boxes 0 as Long → ClassCastException.
             self._hook_all(class_name, "doUpgrade", before=self._before_do_upgrade)
 
     def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
@@ -2617,13 +2623,12 @@ class LocalSnosPlugin(BasePlugin):
             return
         # Prepaid path: StarGiftSheet skips getPaymentForm and later
         # calls payments.upgradeStarGift, which we fake as success.
-        self._set_field(saved, "can_upgrade", True)
-        if not self._set_field(saved, "upgrade_stars", _jlong(25)):
-            self._set_field(saved, "upgrade_stars", 25)
+        self._set_bool(saved, "can_upgrade", True)
+        self._set_long(saved, "upgrade_stars", 25)
         flags = _as_int(getattr(saved, "flags", 0))
         flags |= SAVED_FLAG_CAN_UPGRADE | SAVED_FLAG_UPGRADE_STARS | SAVED_FLAG_MSG_ID
         flags &= ~SAVED_FLAG_SAVED_ID
-        self._set_field(saved, "flags", flags)
+        self._set_int(saved, "flags", flags)
 
     def _before_gift_sheet_show(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
@@ -3050,7 +3055,7 @@ class LocalSnosPlugin(BasePlugin):
         self._set_field(action, "can_resell_at", far)
         flags = _as_int(getattr(action, "flags", 0))
         flags |= 4  # saved
-        self._set_field(action, "flags", flags)
+        self._set_int(action, "flags", flags)
         peer = self._self_peer()
         if peer is not None:
             self._set_field(action, "from_id", peer)
@@ -3059,20 +3064,20 @@ class LocalSnosPlugin(BasePlugin):
         if message is None:
             return None
         msg_id = _as_int(rec.get("msg_id"))
-        self._set_field(message, "id", msg_id)
-        self._set_field(message, "date", int(time.time()))
+        self._set_int(message, "id", msg_id)
+        self._set_int(message, "date", int(time.time()))
         self._set_field(message, "action", action)
         if peer is not None:
             self._set_field(message, "from_id", peer)
             self._set_field(message, "peer_id", peer)
         self._set_field(message, "out", True)
-        self._set_field(message, "local_id", msg_id)
+        self._set_int(message, "local_id", msg_id)
         upd = self._new_tl(TL_UPDATE_NEW_MSG_NAMES)
         if upd is None:
             return None
         self._set_field(upd, "message", message)
-        self._set_field(upd, "pts", 0)
-        self._set_field(upd, "pts_count", 0)
+        self._set_int(upd, "pts", 0)
+        self._set_int(upd, "pts_count", 0)
         bucket = _new_java_list()
         try:
             bucket.add(upd)
@@ -3081,8 +3086,8 @@ class LocalSnosPlugin(BasePlugin):
         self._set_field(updates, "updates", bucket)
         self._set_field(updates, "users", _new_java_list())
         self._set_field(updates, "chats", _new_java_list())
-        self._set_field(updates, "date", int(time.time()))
-        self._set_field(updates, "seq", 0)
+        self._set_int(updates, "date", int(time.time()))
+        self._set_int(updates, "seq", 0)
         try:
             setattr(updates, "_local_snos_upgrade", True)
         except Exception:
@@ -3164,15 +3169,24 @@ class LocalSnosPlugin(BasePlugin):
         new = base + extra
         if new == current and prev == extra:
             return
-        self._set_field(user_full, "stargifts_count", new)
+        self._set_int(user_full, "stargifts_count", new)
         flags2 = _as_int(getattr(user_full, "flags2", 0))
         flags2 |= USERFULL_STARGIFTS_FLAG2
-        self._set_field(user_full, "flags2", flags2)
+        self._set_int(user_full, "flags2", flags2)
         self._gift_count_bump = extra
 
     def _inject_into_gifts_list(self, gifts_list: Any) -> None:
-        if gifts_list is None:
+        if gifts_list is None or getattr(self, "_injecting", False):
             return
+        self._injecting = True
+        try:
+            self._inject_into_gifts_list_inner(gifts_list)
+        except Exception:
+            _safe_log(f"inject gifts crashed:\n{_format_exc()}")
+        finally:
+            self._injecting = False
+
+    def _inject_into_gifts_list_inner(self, gifts_list: Any) -> None:
         built = self._built_local_saved()
         raw = getattr(gifts_list, "gifts", None)
         if raw is None:
@@ -3203,7 +3217,7 @@ class LocalSnosPlugin(BasePlugin):
             return
         total = _as_int(getattr(gifts_list, "totalCount", len(kept)))
         server_total = max(0, total - locals_now)
-        self._set_field(gifts_list, "totalCount", server_total + len(built))
+        self._set_int(gifts_list, "totalCount", server_total + len(built))
 
     def _refresh_gifts_ui(self) -> None:
         account = self._selected_account()
@@ -3227,10 +3241,8 @@ class LocalSnosPlugin(BasePlugin):
                         pass
         except Exception:
             _safe_log(f"refresh gifts lists failed:\n{_format_exc()}")
-        try:
-            self._notify_ui(account)
-        except Exception:
-            pass
+        # Do not post updateInterfaces here. Gift add must not go through
+        # the freeze notify path (Integer/Long crashes, fragment refresh).
 
     def _iter_profile_gifts_lists(self, account: int) -> List[Any]:
         found: List[Any] = []
@@ -3317,7 +3329,7 @@ class LocalSnosPlugin(BasePlugin):
             done(fallback, None)
             return
         try:
-            self._set_field(req, "gift_id", gift_id)
+            self._set_long(req, "gift_id", gift_id)
         except Exception:
             try:
                 req.gift_id = _jlong(gift_id)
@@ -3397,7 +3409,7 @@ class LocalSnosPlugin(BasePlugin):
         if model is not None:
             self._set_field(model, "name", _as_str(meta.get("model") or "Model"))
             rarity = int(float(meta.get("model_rarity") or 1.0) * 10)
-            self._set_field(model, "rarity_permille", rarity)
+            self._set_int(model, "rarity_permille", rarity)
             sticker = getattr(catalog, "sticker", None) if catalog is not None else None
             if sticker is not None:
                 self._set_field(model, "document", sticker)
@@ -3410,7 +3422,7 @@ class LocalSnosPlugin(BasePlugin):
         if pattern is not None:
             self._set_field(pattern, "name", _as_str(meta.get("pattern") or "Pattern"))
             rarity = int(float(meta.get("pattern_rarity") or 2.0) * 10)
-            self._set_field(pattern, "rarity_permille", rarity)
+            self._set_int(pattern, "rarity_permille", rarity)
             sticker = getattr(catalog, "sticker", None) if catalog is not None else None
             if sticker is not None:
                 self._set_field(pattern, "document", sticker)
@@ -3423,11 +3435,11 @@ class LocalSnosPlugin(BasePlugin):
         if backdrop is not None:
             self._set_field(backdrop, "name", _as_str(meta.get("backdrop") or "Backdrop"))
             rarity = int(float(meta.get("backdrop_rarity") or 3.0) * 10)
-            self._set_field(backdrop, "rarity_permille", rarity)
-            self._set_field(backdrop, "center_color", 0x3B1F6B)
-            self._set_field(backdrop, "edge_color", 0x12081F)
-            self._set_field(backdrop, "pattern_color", 0xF4C6FF)
-            self._set_field(backdrop, "text_color", 0xFFFFFF)
+            self._set_int(backdrop, "rarity_permille", rarity)
+            self._set_int(backdrop, "center_color", 0x3B1F6B)
+            self._set_int(backdrop, "edge_color", 0x12081F)
+            self._set_int(backdrop, "pattern_color", 0xF4C6FF)
+            self._set_int(backdrop, "text_color", 0xFFFFFF)
             try:
                 attrs.add(backdrop)
                 added += 1
@@ -3720,6 +3732,82 @@ class LocalSnosPlugin(BasePlugin):
             return bool(set_private_field(obj, name, value))
         except Exception:
             return False
+
+    def _find_java_field(self, obj: Any, name: str) -> Any:
+        try:
+            cls = obj.getClass()
+        except Exception:
+            return None
+        while cls is not None:
+            try:
+                field = cls.getDeclaredField(name)
+                field.setAccessible(True)
+                return field
+            except Exception:
+                try:
+                    cls = cls.getSuperclass()
+                except Exception:
+                    return None
+        return None
+
+    def _set_int(self, obj: Any, name: str, value: int) -> bool:
+        field = self._find_java_field(obj, name) if obj is not None else None
+        if field is not None:
+            try:
+                tname = _as_str(field.getType().getName())
+                ivalue = int(value)
+                if tname == "int":
+                    field.setInt(obj, ivalue)
+                    return True
+                if tname == "long":
+                    field.setLong(obj, ivalue)
+                    return True
+                if tname == "java.lang.Integer":
+                    field.set(obj, _jint(ivalue))
+                    return True
+                if tname == "java.lang.Long":
+                    field.set(obj, _jlong(ivalue))
+                    return True
+            except Exception:
+                pass
+        return self._set_field(obj, name, int(value))
+
+    def _set_long(self, obj: Any, name: str, value: int) -> bool:
+        field = self._find_java_field(obj, name) if obj is not None else None
+        if field is not None:
+            try:
+                tname = _as_str(field.getType().getName())
+                ivalue = int(value)
+                if tname == "long":
+                    field.setLong(obj, ivalue)
+                    return True
+                if tname == "int":
+                    field.setInt(obj, ivalue)
+                    return True
+                if tname == "java.lang.Long":
+                    field.set(obj, _jlong(ivalue))
+                    return True
+                if tname == "java.lang.Integer":
+                    field.set(obj, _jint(ivalue))
+                    return True
+            except Exception:
+                pass
+        return self._set_field(obj, name, _jlong(int(value)))
+
+    def _set_bool(self, obj: Any, name: str, value: bool) -> bool:
+        field = self._find_java_field(obj, name) if obj is not None else None
+        if field is not None:
+            try:
+                tname = _as_str(field.getType().getName())
+                if tname == "boolean":
+                    field.setBoolean(obj, bool(value))
+                    return True
+                if tname == "java.lang.Boolean":
+                    field.set(obj, bool(value))
+                    return True
+            except Exception:
+                pass
+        return self._set_field(obj, name, bool(value))
 
     def _notify_ui(self, account: int, user_id: Optional[int] = None, fragment: Any = None) -> None:
         def _do() -> None:
