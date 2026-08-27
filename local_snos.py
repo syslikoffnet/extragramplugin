@@ -64,12 +64,12 @@ __description__ = (
     "Локальный снос чужих аккаунтов и локальные NFT-подарки.\n\n"
     "Кнопка **hi** в меню профиля (⋮) и команда `.snos id/@user` "
     "делают человека похожим на замороженный аккаунт — **только у тебя**.\n\n"
-    "Имя → «❄ удаленный аккаунт», аватар-снежинка, статус под именем — "
-    "«Аккаунт заморожен» (не описание). В своём профиле можно добавить "
-    "локальные подарки и улучшить их. Настоящие подарки плагин не трогает."
+    "Локально ставит user.deleted — клиент сам рисует HiddenName и "
+    "аватар deleted (снежинка), как настоящий frozen. В своём профиле "
+    "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -423,7 +423,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.2 loaded")
+        self.log("Local Snos 1.1.3 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -459,21 +459,10 @@ class LocalSnosPlugin(BasePlugin):
                 subtext="Команда не отправляется собеседнику",
                 icon="msg_offline",
             ),
-            Input(
-                key=DISPLAY_NAME_KEY,
-                text="Локальное имя",
-                default=DEFAULT_DISPLAY_NAME,
-                subtext="Так будет называться скрытый аккаунт",
-                icon="msg_edit",
-                on_change=lambda _value: self._schedule_reapply(),
-            ),
-            Input(
-                key=FROZEN_BIO_KEY,
-                text="Текст «заморозки»",
-                default=DEFAULT_FROZEN_BIO,
-                subtext="Статус под именем, не описание аккаунта",
+            Text(
+                text="Как рисует Telegram",
+                subtext="Плагин только ставит user.deleted. Имя (HiddenName) и снежинку в аватаре рисует сам клиент — как у настоящего frozen.",
                 icon="msg_info",
-                on_change=lambda _value: self._schedule_reapply(),
             ),
             Divider(text="Как пользоваться"),
             Text(
@@ -1095,11 +1084,11 @@ class LocalSnosPlugin(BasePlugin):
             self._records[key] = record
 
     def _looks_already_mutated(self, user: Any) -> bool:
-        name = _as_str(getattr(user, "first_name", "") or "")
         if not bool(getattr(user, "deleted", False)):
             return False
-        display = self._display_name()
-        return name == display or name == self._frozen_title() or name.endswith(display)
+        if _as_str(getattr(user, "username", "") or "").strip():
+            return False
+        return self._is_empty_photo(getattr(user, "photo", None))
 
     def _mutate_user(self, user: Any) -> None:
         if not _is_tl_user(user):
@@ -1108,8 +1097,9 @@ class LocalSnosPlugin(BasePlugin):
             return
         self._applying = True
         try:
-            display = self._frozen_title()
-            self._set_field(user, "first_name", display)
+            # Real frozen/deleted users have empty names. Telegram then
+            # draws LocaleController HiddenName via UserObject.getUserName.
+            self._set_field(user, "first_name", "")
             self._set_field(user, "last_name", "")
             self._set_field(user, "username", None)
             self._set_field(user, "deleted", True)
@@ -1254,16 +1244,6 @@ class LocalSnosPlugin(BasePlugin):
             after=self._after_get_user_full,
         )
         self._hook_all(
-            "org.telegram.messenger.UserObject",
-            "getUserName",
-            after=self._after_get_user_name,
-        )
-        self._hook_all(
-            "org.telegram.messenger.UserObject",
-            "getFirstName",
-            after=self._after_get_first_name,
-        )
-        self._hook_all(
             "org.telegram.ui.Components.AvatarDrawable",
             "setInfo",
             after=self._after_avatar_set_info,
@@ -1331,30 +1311,6 @@ class LocalSnosPlugin(BasePlugin):
             return
         self._maybe_touch_user_full(param.getResult())
 
-    def _after_get_user_name(self, param: Any) -> None:
-        if not self._feature_enabled() or not self._snos_ids:
-            return
-        args = getattr(param, "args", None)
-        if not args:
-            return
-        user = args[0]
-        if not _is_tl_user(user):
-            return
-        if _as_int(getattr(user, "id", 0)) in self._snos_ids:
-            param.setResult(self._frozen_title())
-
-    def _after_get_first_name(self, param: Any) -> None:
-        if not self._feature_enabled() or not self._snos_ids:
-            return
-        args = getattr(param, "args", None)
-        if not args:
-            return
-        user = args[0]
-        if not _is_tl_user(user):
-            return
-        if _as_int(getattr(user, "id", 0)) in self._snos_ids:
-            param.setResult(self._frozen_title())
-
     def _after_avatar_set_info(self, param: Any) -> None:
         if not self._feature_enabled() or not self._snos_ids:
             return
@@ -1411,149 +1367,74 @@ class LocalSnosPlugin(BasePlugin):
             after=self._after_update_profile_data,
         )
         self._hook_all(
-            "org.telegram.ui.Components.ChatAvatarContainer",
-            "setSubtitle",
-            before=self._before_avatar_set_subtitle,
-        )
-        self._hook_all(
-            "org.telegram.ui.Components.ChatAvatarContainer",
-            "setTitle",
-            before=self._before_avatar_set_title,
-        )
-        self._hook_all(
-            "org.telegram.messenger.LocaleController",
-            "formatUserStatus",
-            after=self._after_format_user_status,
-        )
-        self._hook_all(
             "org.telegram.ui.ChatActivity",
             "updateSubtitle",
             after=self._after_chat_update_subtitle,
         )
 
     def _after_update_profile_data(self, param: Any) -> None:
-        self._paint_frozen_profile(getattr(param, "thisObject", None))
+        self._nudge_native_deleted(getattr(param, "thisObject", None))
 
     def _after_chat_update_subtitle(self, param: Any) -> None:
-        fragment = getattr(param, "thisObject", None)
-        user_id = self._ui_user_id(fragment)
-        if user_id not in self._snos_ids or not self._feature_enabled():
-            return
-        avatar = getattr(fragment, "avatarContainer", None)
-        if avatar is None:
-            try:
-                avatar = get_private_field(fragment, "avatarContainer")
-            except Exception:
-                avatar = None
-        if avatar is None:
-            return
-        frozen = self._frozen_bio()
-        title = self._frozen_title()
-        for name, value in (("setSubtitle", frozen), ("setTitle", title)):
-            method = getattr(avatar, name, None)
-            if callable(method):
-                try:
-                    method(value)
-                except Exception:
-                    continue
+        self._nudge_native_deleted(getattr(param, "thisObject", None))
 
-    def _before_avatar_set_subtitle(self, param: Any) -> None:
-        if not self._feature_enabled() or not self._snos_ids:
-            return
-        user_id = self._ui_user_id(getattr(param, "thisObject", None))
-        if user_id not in self._snos_ids:
-            return
-        args = getattr(param, "args", None)
-        if not args:
-            return
-        frozen = self._frozen_bio()
-        try:
-            if _as_str(args[0] or "") == frozen:
-                return
-            args[0] = frozen
-        except Exception:
-            pass
-
-    def _before_avatar_set_title(self, param: Any) -> None:
-        if not self._feature_enabled() or not self._snos_ids:
-            return
-        user_id = self._ui_user_id(getattr(param, "thisObject", None))
-        if user_id not in self._snos_ids:
-            return
-        args = getattr(param, "args", None)
-        if not args:
-            return
-        title = self._frozen_title()
-        try:
-            if _as_str(args[0] or "") == title:
-                return
-            args[0] = title
-        except Exception:
-            pass
-
-    def _after_format_user_status(self, param: Any) -> None:
-        if not self._feature_enabled() or not self._snos_ids:
-            return
-        args = getattr(param, "args", None)
-        if not args:
-            return
-        user = None
-        for item in list(args):
-            if _is_tl_user(item):
-                user = item
-                break
-        if user is None:
-            return
-        if _as_int(getattr(user, "id", 0)) not in self._snos_ids:
-            return
-        param.setResult(self._frozen_bio())
-
-    def _paint_frozen_profile(self, fragment: Any) -> None:
+    def _nudge_native_deleted(self, fragment: Any) -> None:
+        """Ask Telegram to redraw via its own AvatarDrawable.setInfo / updateAvatar."""
         if fragment is None or not self._feature_enabled() or not self._snos_ids:
             return
         user_id = self._ui_user_id(fragment)
         if user_id not in self._snos_ids:
             return
-        title = self._frozen_title()
-        frozen = self._frozen_bio()
+        user = self._get_user(self._selected_account(), user_id)
+        if user is not None:
+            self._mutate_user(user)
+            self._call_set_info(fragment, user)
+        for name in ("avatarDrawable", "avatar", "avatarImage"):
+            target = None
+            try:
+                target = get_private_field(fragment, name)
+            except Exception:
+                target = getattr(fragment, name, None)
+            self._call_set_info(target, user)
         avatar = getattr(fragment, "avatarContainer", None)
         if avatar is None:
             try:
                 avatar = get_private_field(fragment, "avatarContainer")
             except Exception:
                 avatar = None
-        if avatar is not None:
-            for name, value in (("setTitle", title), ("setSubtitle", frozen)):
-                method = getattr(avatar, name, None)
-                if callable(method):
-                    try:
-                        method(value)
-                    except Exception:
-                        pass
-        for field, value in (("nameTextView", title), ("onlineTextView", frozen)):
-            views = None
+        if avatar is None:
+            return
+        self._call_set_info(avatar, user)
+        for name in ("avatarDrawable", "avatarImageView"):
+            child = None
             try:
-                views = get_private_field(fragment, field)
+                child = get_private_field(avatar, name)
             except Exception:
-                views = getattr(fragment, field, None)
-            if views is None:
-                continue
-            try:
-                items = list(views)
-            except Exception:
-                items = [views]
-            for view in items:
-                if view is None:
+                child = getattr(avatar, name, None)
+            self._call_set_info(child, user)
+        for name in ("checkAndUpdateAvatar", "updateAvatar"):
+            method = getattr(avatar, name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
                     continue
-                setter = getattr(view, "setText", None)
-                if callable(setter):
-                    try:
-                        setter(value)
-                    except Exception:
-                        continue
 
-    def _frozen_title(self) -> str:
-        return "❄ " + self._display_name()
+    def _call_set_info(self, obj: Any, user: Any) -> None:
+        if obj is None or user is None:
+            return
+        method = getattr(obj, "setInfo", None)
+        if not callable(method):
+            return
+        try:
+            method(user)
+            return
+        except Exception:
+            pass
+        try:
+            method(int(self._selected_account()), user)
+        except Exception:
+            pass
 
     def _ui_user_id(self, obj: Any) -> int:
         if obj is None:
@@ -3143,9 +3024,9 @@ class LocalSnosPlugin(BasePlugin):
                 except Exception:
                     continue
         try:
-            self._paint_frozen_profile(fragment)
+            self._nudge_native_deleted(fragment)
         except Exception:
-            _safe_log(f"paint frozen failed:\n{_format_exc()}")
+            _safe_log(f"native deleted redraw failed:\n{_format_exc()}")
         avatar = getattr(fragment, "avatarContainer", None)
         if avatar is None:
             avatar = get_private_field(fragment, "avatarContainer")
