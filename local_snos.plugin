@@ -17,19 +17,126 @@ import time
 import traceback
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from android_utils import log, run_on_ui_thread
-from base_plugin import (
-    BasePlugin,
-    HookResult,
-    HookStrategy,
-    MenuItemData,
-    MenuItemType,
-    MethodHook,
-)
-from hook_utils import find_class, get_private_field, set_private_field
-from ui.alert import AlertDialogBuilder
-from ui.bulletin import BulletinHelper
-from ui.settings import Divider, Header, Input, Switch, Text
+try:
+    from android_utils import log, run_on_ui_thread
+    from base_plugin import (
+        BasePlugin,
+        HookResult,
+        HookStrategy,
+        MenuItemData,
+        MenuItemType,
+        MethodHook,
+    )
+    from hook_utils import find_class, get_private_field, set_private_field
+    from ui.alert import AlertDialogBuilder
+    from ui.bulletin import BulletinHelper
+    from ui.settings import Divider, Header, Input, Switch, Text
+except ImportError:
+    # Opened as a raw .py outside ExtraGram plugin engine.
+    # Installing this file as a document crashes with No module named base_plugin.
+    def log(message: str) -> None:  # type: ignore
+        pass
+
+    def run_on_ui_thread(fn: Any, delay: int = 0) -> None:  # type: ignore
+        return
+
+    class BasePlugin:  # type: ignore
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def log(self, message: str) -> None:
+            pass
+
+        def get_setting(self, key: str, default: Any = None) -> Any:
+            return default
+
+        def set_setting(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def hook_all_methods(self, *args: Any, **kwargs: Any) -> list:
+            return []
+
+        def add_menu_item(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def add_on_send_message_hook(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def add_hook(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class HookResult:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class HookStrategy:  # type: ignore
+        CANCEL = "CANCEL"
+        MODIFY = "MODIFY"
+
+    class MenuItemData:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class MenuItemType:  # type: ignore
+        PROFILE_ACTION_MENU = 1
+        CHAT_ACTION_MENU = 2
+
+    class MethodHook:  # type: ignore
+        pass
+
+    def find_class(name: str) -> Any:  # type: ignore
+        return None
+
+    def get_private_field(*args: Any, **kwargs: Any) -> Any:  # type: ignore
+        return None
+
+    def set_private_field(*args: Any, **kwargs: Any) -> bool:  # type: ignore
+        return False
+
+    class AlertDialogBuilder:  # type: ignore
+        BUTTON_POSITIVE = -1
+        BUTTON_NEUTRAL = -3
+        ALERT_TYPE_SPINNER = 2
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class BulletinHelper:  # type: ignore
+        @staticmethod
+        def show_info(text: str) -> None:
+            pass
+
+        @staticmethod
+        def show_success(text: str) -> None:
+            pass
+
+        @staticmethod
+        def show_error(text: str) -> None:
+            pass
+
+        @staticmethod
+        def show_undo(*args: Any, **kwargs: Any) -> None:
+            pass
+
+    class Divider:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class Header:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class Input:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class Switch:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class Text:  # type: ignore
+        def __init__(self, **kwargs: Any) -> None:
+            pass
 
 try:
     from client_utils import (
@@ -69,7 +176,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -168,6 +275,11 @@ TL_UNIQUE_NAMES = (
     "org.telegram.tgnet.tl.TL_stars$TL_starGiftUnique",
     "org.telegram.tgnet.tl.TL_stars$starGiftUnique",
     "org.telegram.tgnet.TLRPC$TL_starGiftUnique",
+)
+TL_STAR_GIFT_NAMES = (
+    "org.telegram.tgnet.tl.TL_stars$TL_starGift",
+    "org.telegram.tgnet.tl.TL_stars$starGift",
+    "org.telegram.tgnet.TLRPC$TL_starGift",
 )
 TL_GET_GIFTS_NAMES = (
     "org.telegram.tgnet.tl.TL_stars$TL_starGifts_getStarGifts",
@@ -502,7 +614,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.3.0 loaded")
+        self.log("Local Snos 1.3.1 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -1350,27 +1462,8 @@ class LocalSnosPlugin(BasePlugin):
             "setInfo",
             after=self._after_avatar_set_info,
         )
-        # Real methods Telegram uses to render deleted users.
-        self._hook_all(
-            "org.telegram.messenger.UserObject",
-            "isDeleted",
-            after=self._after_user_is_deleted,
-        )
-        self._hook_all(
-            "org.telegram.messenger.UserObject",
-            "getUserName",
-            after=self._after_user_get_name,
-        )
-        self._hook_all(
-            "org.telegram.messenger.UserObject",
-            "hasPhoto",
-            after=self._after_user_has_photo,
-        )
-        self._hook_all(
-            "org.telegram.ui.Components.ChatAvatarContainer",
-            "setUserAvatar",
-            after=self._after_set_user_avatar,
-        )
+        # Do not hook UserObject.isDeleted/getUserName/hasPhoto: setResult on
+        # boolean methods crashes ExtraGram the same way sendRequest did.
         self._hook_all(
             "org.telegram.messenger.MessagesStorage",
             "putUsersAndChats",
@@ -1585,20 +1678,9 @@ class LocalSnosPlugin(BasePlugin):
         return ""
 
     def _commit_user(self, account: int, user: Any) -> None:
-        if user is None:
-            return
-        mc = self._messages_controller(account)
-        if mc is None:
-            return
-        method = getattr(mc, "putUser", None)
-        if not callable(method):
-            return
-        for args in ((user, False), (user, False, True)):
-            try:
-                method(*args)
-                return
-            except Exception:
-                continue
+        # Never call MessagesController.putUser from the plugin.
+        # It re-enters putUser/getUser hooks and crashes the client.
+        return
 
     def _install_frozen_ui_hooks(self) -> None:
         self._hook_all(
@@ -1812,7 +1894,7 @@ class LocalSnosPlugin(BasePlugin):
             _safe_log(f"persist gifts failed:\n{_format_exc()}")
 
     def _new_gift_id(self) -> str:
-        return f"g{int(time.time() * 1000) % 1000000000}{random.randint(10, 99)}"
+        return f"g{int(time.time() * 1000)}{random.randint(1000, 9999)}{len(self._gifts)}"
 
     def _next_msg_id(self, existing: Optional[List[Dict[str, Any]]] = None) -> int:
         used = {_as_int(item.get("msg_id")) for item in (existing if existing is not None else self._gifts)}
@@ -2386,13 +2468,15 @@ class LocalSnosPlugin(BasePlugin):
             gid = _as_int(getattr(gift, "id", 0) or getattr(gift, "gift_id", 0))
             if gid <= 0:
                 continue
-            existing = self._catalog_by_id.get(gid)
-            if existing is not None and self._gift_is_unique_obj(gift) and not self._gift_is_unique_obj(existing):
+            if self._gift_is_unique_obj(gift):
                 continue
+            existing = self._catalog_by_id.get(gid)
             if existing is None:
                 self._catalog.append(gift)
                 added += 1
-            self._catalog_by_id[gid] = gift if not self._gift_is_unique_obj(gift) else existing or gift
+                self._catalog_by_id[gid] = gift
+            elif not self._gift_is_unique_obj(existing):
+                self._catalog_by_id[gid] = existing
         if self._catalog:
             self._catalog_at = time.time()
         return added
@@ -2648,16 +2732,43 @@ class LocalSnosPlugin(BasePlugin):
                 built.append(obj)
         return built
 
+    def _clone_star_gift(self, gift: Any) -> Any:
+        if gift is None:
+            return None
+        clone = self._new_tl(TL_STAR_GIFT_NAMES)
+        if clone is None:
+            return None
+        self._set_long(clone, "id", _as_int(getattr(gift, "id", 0)))
+        self._set_long(clone, "stars", _as_int(getattr(gift, "stars", 0)))
+        self._set_long(clone, "convert_stars", _as_int(getattr(gift, "convert_stars", 0)))
+        self._set_long(clone, "upgrade_stars", _as_int(getattr(gift, "upgrade_stars", 0)))
+        self._set_int(clone, "availability_remains", _as_int(getattr(gift, "availability_remains", 0)))
+        self._set_int(clone, "availability_total", _as_int(getattr(gift, "availability_total", 0)))
+        self._set_bool(clone, "limited", bool(getattr(gift, "limited", False)))
+        self._set_bool(clone, "sold_out", bool(getattr(gift, "sold_out", False)))
+        self._set_bool(clone, "birthday", bool(getattr(gift, "birthday", False)))
+        title = _as_str(getattr(gift, "title", "") or "")
+        if title:
+            self._set_field(clone, "title", title)
+        sticker = getattr(gift, "sticker", None)
+        if sticker is not None:
+            self._set_field(clone, "sticker", sticker)
+        flags = _as_int(getattr(gift, "flags", 0))
+        self._set_int(clone, "flags", flags)
+        return clone
+
     def _build_saved_gift(self, rec: Dict[str, Any]) -> Any:
         saved = self._new_tl(TL_SAVED_NAMES)
         if saved is None:
             return None
         catalog = self._catalog_by_id.get(_as_int(rec.get("gift_id")))
-        gift_obj = catalog
+        gift_obj = None
         if rec.get("upgraded"):
-            unique_obj = self._build_unique_gift(rec, catalog)
-            if unique_obj is not None:
-                gift_obj = unique_obj
+            gift_obj = self._build_unique_gift(rec, catalog)
+        else:
+            gift_obj = self._clone_star_gift(catalog)
+            if gift_obj is None:
+                gift_obj = catalog
         if gift_obj is None:
             return None
 
@@ -2686,13 +2797,15 @@ class LocalSnosPlugin(BasePlugin):
     def _build_unique_gift(self, rec: Dict[str, Any], catalog: Any) -> Any:
         unique = self._new_tl(TL_UNIQUE_NAMES)
         if unique is None:
-            return catalog
+            return None
         meta = rec.get("unique") or {}
-        unique_id = 9_000_000_000_000 + (_as_int(rec.get("msg_id")) % 1_000_000_000)
+        rec_key = _as_str(rec.get("id") or rec.get("msg_id") or "0")
+        unique_id = 9_000_000_000_000 + (abs(hash(rec_key)) % 1_000_000_000)
         self._set_long(unique, "id", unique_id)
         self._set_long(unique, "gift_id", _as_int(rec.get("gift_id")))
-        self._set_field(unique, "title", _as_str(meta.get("title") or rec.get("title") or "Collectible"))
-        self._set_field(unique, "slug", _as_str(meta.get("slug") or rec.get("slug")))
+        # Title always from THIS rec, never from a shared catalog object.
+        self._set_field(unique, "title", _as_str(rec.get("title") or meta.get("title") or "Collectible"))
+        self._set_field(unique, "slug", _as_str(rec.get("slug") or meta.get("slug") or (LOCAL_SLUG_PREFIX + rec_key)))
         self._set_int(unique, "num", _as_int(meta.get("num"), 1))
         self._set_int(unique, "availability_issued", _as_int(meta.get("issued"), 1))
         self._set_int(unique, "availability_total", _as_int(meta.get("total"), 50000))
@@ -2702,11 +2815,9 @@ class LocalSnosPlugin(BasePlugin):
             flags = _as_int(getattr(unique, "flags", 0))
             flags |= 1
             self._set_int(unique, "flags", flags)
-        attrs = self._unique_attr_refs.get(str(rec.get("id")))
-        if attrs is None or not _java_list(attrs):
-            attrs = self._synthetic_unique_attrs(rec, catalog)
-            if attrs is not None:
-                self._unique_attr_refs[str(rec.get("id"))] = attrs
+        attrs = self._synthetic_unique_attrs(rec, catalog)
+        if attrs is not None:
+            self._unique_attr_refs[str(rec.get("id"))] = attrs
         if attrs is None:
             attrs = _new_java_list()
         self._set_field(unique, "attributes", attrs)
@@ -3261,19 +3372,12 @@ class LocalSnosPlugin(BasePlugin):
             self._set_bool(sheet, "rolling", True)
         except Exception:
             pass
-        gifts_list = None
+        # Do not call sheet.set(saved, giftsList): native set rebinds every
+        # list item that shares the catalog gift id (all Pepes become one).
         try:
-            gifts_list = get_private_field(sheet, "giftsList")
+            self._set_field(sheet, "savedStarGift", saved)
         except Exception:
-            gifts_list = getattr(sheet, "giftsList", None)
-        setter = getattr(sheet, "set", None)
-        if callable(setter) and saved is not None:
-            for args in ((saved, gifts_list), (saved,)):
-                try:
-                    setter(*args)
-                    break
-                except Exception:
-                    continue
+            pass
         try:
             self._set_bool(sheet, "rolling", False)
         except Exception:
@@ -3821,19 +3925,10 @@ class LocalSnosPlugin(BasePlugin):
         return found
 
     def _gift_is_unique_obj(self, gift: Any) -> bool:
-
         if gift is None:
             return False
         name = _class_name(gift).lower()
-        if "unique" in name:
-            return True
-        slug = _as_str(getattr(gift, "slug", None) or "").strip()
-        gift_id = _as_int(getattr(gift, "gift_id", 0))
-        # Unique collectibles have a real slug plus the base gift_id.
-        # Regular Java starGift objects often still *declare* slug/num/attributes.
-        if slug and gift_id > 0:
-            return True
-        return False
+        return "unique" in name
 
     def _fetch_upgrade_preview(self, rec: Dict[str, Any], done: Callable) -> None:
         gift_id = _as_int(rec.get("gift_id"))
