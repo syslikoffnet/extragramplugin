@@ -170,12 +170,12 @@ __name__ = "Local Snos"
 __description__ = (
     "Локальный снос чужих аккаунтов и локальные NFT-подарки.\n\n"
     "Кнопка **hi** в меню профиля (⋮) и команда `.snos id/@user` "
-    "рисуют frozen: HiddenName, снежинка, статус «Аккаунт заморожен» — только у тебя.\n\n"
+    "рисуют frozen: HiddenName, снежинка у имени, в «О себе» — «Аккаунт заморожен» — только у тебя.\n\n"
     "На своём профиле — неулучшенные подарки из каталога с TGS-анимацией "
     "и локальным улучшением без Stars. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -635,7 +635,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.4.1 loaded")
+        self.log("Local Snos 1.4.2 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -673,7 +673,7 @@ class LocalSnosPlugin(BasePlugin):
             ),
             Text(
                 text="Как выглядит снос",
-                subtext="Имя — HiddenName, аватар — снежинка, статус — «Аккаунт заморожен». Только в этом клиенте.",
+                subtext="Имя — HiddenName, под ним last seen, в «О себе» — «Аккаунт заморожен». Только в этом клиенте.",
                 icon="msg_info",
             ),
             Divider(text="Как пользоваться"),
@@ -1734,7 +1734,8 @@ class LocalSnosPlugin(BasePlugin):
             self._status_ui_lock = False
 
     def _apply_frozen_status_ui_inner(self, fragment: Any, avatar: Any = None) -> None:
-        text = self._frozen_bio()
+        # Real frozen UI: "The account was frozen" lives in bio (userFull.about).
+        # Under the name Telegram itself shows last seen. Do not overwrite subtitle.
         icon = self._snowflake_drawable()
         if avatar is None:
             try:
@@ -1742,60 +1743,43 @@ class LocalSnosPlugin(BasePlugin):
             except Exception:
                 avatar = getattr(fragment, "avatarContainer", None)
         if avatar is not None:
-            for method_name, args in (
-                ("setSubtitle", (text,)),
-                ("setSubtitle", (text, True)),
-            ):
-                method = getattr(avatar, method_name, None)
-                if callable(method):
-                    try:
-                        method(*args)
-                        break
-                    except Exception:
-                        continue
             title = None
             try:
                 title = get_private_field(avatar, "titleTextView")
             except Exception:
                 title = getattr(avatar, "titleTextView", None)
-            self._set_right_drawable(title, icon)
-        for field, as_status in (("nameTextView", False), ("onlineTextView", True)):
-            views = None
-            try:
-                views = get_private_field(fragment, field)
-            except Exception:
-                views = getattr(fragment, field, None)
-            if views is None:
-                continue
-            try:
-                iterable = list(views)
-            except Exception:
-                iterable = [views]
-            for view in iterable:
-                if view is None:
-                    continue
-                if as_status:
-                    setter = getattr(view, "setText", None)
-                    if callable(setter):
-                        try:
-                            setter(text)
-                        except Exception:
-                            pass
-                else:
-                    self._set_right_drawable(view, icon)
+            self._set_name_snowflake(title, icon)
+        views = None
+        try:
+            views = get_private_field(fragment, "nameTextView")
+        except Exception:
+            views = getattr(fragment, "nameTextView", None)
+        if views is None:
+            return
+        try:
+            iterable = list(views)
+        except Exception:
+            iterable = [views]
+        for view in iterable:
+            self._set_name_snowflake(view, icon)
 
-    def _set_right_drawable(self, view: Any, icon: Any) -> None:
+    def _set_name_snowflake(self, view: Any, icon: Any) -> None:
         if view is None or icon is None:
             return
-        method = getattr(view, "setRightDrawable", None)
-        if not callable(method):
-            return
-        for args in ((icon,), (icon, True), (icon, True, True)):
-            try:
-                method(*args)
-                return
-            except Exception:
+        # Screenshots: snowflake sits to the left of "Deleted Account".
+        for method_name in ("setLeftDrawable", "setRightDrawable"):
+            method = getattr(view, method_name, None)
+            if not callable(method):
                 continue
+            for args in ((icon,), (icon, True), (icon, True, True)):
+                try:
+                    method(*args)
+                    return
+                except Exception:
+                    continue
+
+    def _set_right_drawable(self, view: Any, icon: Any) -> None:
+        self._set_name_snowflake(view, icon)
 
     def _commit_user(self, account: int, user: Any) -> None:
         # Never call MessagesController.putUser from the plugin.
@@ -4420,8 +4404,44 @@ class LocalSnosPlugin(BasePlugin):
         return value or DEFAULT_DISPLAY_NAME
 
     def _frozen_bio(self) -> str:
-        value = _as_str(self.get_setting(FROZEN_BIO_KEY, DEFAULT_FROZEN_BIO)).strip()
-        return value or DEFAULT_FROZEN_BIO
+        value = _as_str(self.get_setting(FROZEN_BIO_KEY, "")).strip()
+        if value:
+            return value
+        try:
+            from org.telegram.messenger import LocaleController
+
+            try:
+                from org.telegram.messenger import R
+
+                for attr in (
+                    "AccountWasFrozen",
+                    "TheAccountWasFrozen",
+                    "AccountFrozen",
+                    "UserFrozen",
+                    "PrivacyProfileAlertMessageFrozen",
+                ):
+                    res_id = getattr(getattr(R, "string", None), attr, None)
+                    if res_id is None:
+                        continue
+                    text = LocaleController.getString(res_id)
+                    if text:
+                        return _as_str(text)
+            except Exception:
+                pass
+            for key in (
+                "AccountWasFrozen",
+                "TheAccountWasFrozen",
+                "AccountFrozen",
+            ):
+                try:
+                    text = LocaleController.getString(key)
+                    if text and text != key:
+                        return _as_str(text)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return DEFAULT_FROZEN_BIO
 
     def _selected_account(self) -> int:
         try:
