@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.6"
+__version__ = "1.1.7"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -314,24 +314,32 @@ def _as_str(value: Any, default: str = "") -> str:
 
 
 def _jlong(value: int) -> Any:
+    text = str(int(value))
     try:
         from java.lang import Long
 
-        return Long(int(value))
+        return Long.valueOf(text)
     except Exception:
-        return int(value)
+        try:
+            from java.lang import Long
+
+            return Long.decode(text)
+        except Exception:
+            return int(value)
 
 
 def _jint(value: int) -> Any:
+    # Pass a string so Chaquopy does not box a Python int as java.lang.Long.
+    text = str(int(value))
     try:
         from java.lang import Integer
 
-        return Integer.valueOf(int(value))
+        return Integer.valueOf(text)
     except Exception:
         try:
             from java.lang import Integer
 
-            return Integer(int(value))
+            return Integer.decode(text)
         except Exception:
             return int(value)
 
@@ -468,7 +476,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.6 loaded")
+        self.log("Local Snos 1.1.7 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -2541,22 +2549,10 @@ class LocalSnosPlugin(BasePlugin):
             self._hook_all(class_name, "show", before=self._before_gift_sheet_show)
             self._hook_ctors(class_name, after=self._after_gift_sheet_ctor)
             self._hook_all(class_name, "set", after=self._after_gift_sheet_set)
-        self._hook_all(
-            "org.telegram.tgnet.ConnectionsManager",
-            "sendRequest",
-            before=self._before_send_request,
-        )
-        self._hook_all(
-            "org.telegram.messenger.MessagesController",
-            "processUpdates",
-            before=self._before_process_updates,
-        )
-        for class_name in (
-            "org.telegram.ui.Components.BulletinFactory",
-            "org.telegram.ui.Components.Bulletin",
-        ):
-            for method_name in ("showForError", "showError"):
-                self._hook_all(class_name, method_name, before=self._before_error_bulletin)
+            # doUpgrade is void — setResult(None) is safe.
+            # Never hook ConnectionsManager.sendRequest: it returns int and
+            # Python/Chaquopy boxes 0 as Long → ClassCastException.
+            self._hook_all(class_name, "doUpgrade", before=self._before_do_upgrade)
 
     def _hook_ctors(self, class_name: str, after: Callable[[Any], None]) -> None:
         cls = find_class(class_name)
@@ -2665,6 +2661,168 @@ class LocalSnosPlugin(BasePlugin):
                     return rec
         return None
 
+    def _before_do_upgrade(self, param: Any) -> None:
+        sheet = getattr(param, "thisObject", None)
+        rec = self._local_from_sheet(sheet, getattr(param, "args", None))
+        if rec is None and sheet is not None:
+            marker = getattr(sheet, "_local_snos_gift", None)
+            if marker:
+                rec = self._gift_by_id(_as_str(marker))
+        if rec is None:
+            return
+        try:
+            param.setResult(None)
+        except Exception:
+            pass
+        gift_id = _as_str(rec.get("id") or "")
+        run_on_ui_thread(lambda s=sheet, gid=gift_id: self._complete_sheet_upgrade(s, gid), 10)
+
+    def _complete_sheet_upgrade(self, sheet: Any, gift_id: str) -> None:
+        rec = self._gift_by_id(gift_id)
+        if rec is None:
+            return
+        if rec.get("upgraded"):
+            self._toast_info("Этот подарок уже коллекционный")
+            return
+
+        def _after(meta: Dict[str, Any], attrs: Any = None) -> None:
+            live = self._gift_by_id(gift_id)
+            if live is None:
+                return
+            if meta:
+                live["unique"] = meta
+            live["upgraded"] = True
+            live["upgraded_at"] = int(time.time())
+            if attrs is not None:
+                self._unique_attr_refs[str(live.get("id"))] = attrs
+            catalog = self._catalog_by_id.get(_as_int(live.get("gift_id")))
+            if attrs is None:
+                attrs = self._synthetic_unique_attrs(live, catalog)
+                if attrs is not None:
+                    self._unique_attr_refs[str(live.get("id"))] = attrs
+            self._persist_gifts()
+            unique_obj = self._build_unique_gift(live, catalog)
+            updates = self._build_upgrade_updates(live, unique_obj)
+            if sheet is not None and updates is not None:
+                if self._apply_sheet_upgrade(sheet, live, updates):
+                    run_on_ui_thread(self._refresh_gifts_ui, 1800)
+                    return
+            self._upgrade_local_gift(gift_id)
+
+        samples = self._sheet_sample_attributes()
+        if samples:
+            fallback = rec.get("unique") or self._roll_unique(rec)
+            meta, attrs = self._unique_from_preview(
+                rec, type("P", (), {"sample_attributes": samples})(), fallback
+            )
+            _after(meta, attrs)
+            return
+        try:
+            self._fetch_upgrade_preview(rec, _after)
+        except Exception:
+            _safe_log(f"sheet upgrade preview failed:\n{_format_exc()}")
+            _after(self._roll_unique(rec), None)
+
+    def _apply_sheet_upgrade(self, sheet: Any, rec: Dict[str, Any], updates: Any) -> bool:
+        input_gift = None
+        for name in ("getInputStarGift",):
+            method = getattr(sheet, name, None)
+            if callable(method):
+                try:
+                    input_gift = method()
+                    break
+                except Exception:
+                    input_gift = None
+        if input_gift is None:
+            input_gift = self._java_call(sheet, "getInputStarGift")
+        button = None
+        try:
+            button = get_private_field(sheet, "button")
+        except Exception:
+            button = getattr(sheet, "button", None)
+        try:
+            if button is not None:
+                button.setLoading(True)
+        except Exception:
+            pass
+
+        def _done() -> None:
+            try:
+                if button is not None:
+                    button.setLoading(False)
+            except Exception:
+                pass
+            switch = getattr(sheet, "switchPage", None)
+            if callable(switch):
+                try:
+                    switch(_jint(0), True)
+                    return
+                except Exception:
+                    pass
+            self._java_call(sheet, "switchPage", _jint(0), True)
+
+        applied = False
+        method = getattr(sheet, "applyNewGiftFromUpdates", None)
+        if callable(method):
+            try:
+                method(input_gift, updates, self._as_runnable(_done))
+                applied = True
+            except Exception:
+                _safe_log(f"applyNewGiftFromUpdates call failed:\n{_format_exc()}")
+        if not applied:
+            applied = bool(
+                self._java_call(
+                    sheet,
+                    "applyNewGiftFromUpdates",
+                    input_gift,
+                    updates,
+                    self._as_runnable(_done),
+                )
+                is not False
+            )
+        return applied
+
+    def _as_runnable(self, fn: Callable[[], None]) -> Any:
+        try:
+            from java.lang import Runnable
+
+            class _Run(Runnable):
+                def run(self) -> None:
+                    try:
+                        fn()
+                    except Exception:
+                        _safe_log(f"runnable failed:\n{_format_exc()}")
+
+            return _Run()
+        except Exception:
+            return fn
+
+    def _java_call(self, obj: Any, method_name: str, *args: Any) -> Any:
+        if obj is None:
+            return False
+        try:
+            cls = obj.getClass()
+        except Exception:
+            return False
+        while cls is not None:
+            try:
+                methods = cls.getDeclaredMethods()
+            except Exception:
+                methods = []
+            for method in methods:
+                try:
+                    if _as_str(method.getName()) != method_name:
+                        continue
+                    method.setAccessible(True)
+                    return method.invoke(obj, *args)
+                except Exception:
+                    continue
+            try:
+                cls = cls.getSuperclass()
+            except Exception:
+                break
+        return False
+
     def _before_send_request(self, param: Any) -> None:
         if not self._gifts:
             return
@@ -2698,15 +2856,8 @@ class LocalSnosPlugin(BasePlugin):
         if not is_upgrade:
             return
         callback = self._request_callback(args)
-        # sendRequest returns int. Python 0 becomes java.lang.Long and
-        # crashes: ClassCastException Long cannot be cast to Integer.
-        try:
-            param.setResult(_jint(0))
-        except Exception:
-            try:
-                param.setResult(None)
-            except Exception:
-                pass
+        # Dead path: sendRequest is no longer hooked (int return = crash).
+        return
         if "paymentform" in name or "payment_form" in name:
             form = self._fake_payment_form()
             if form is not None:
