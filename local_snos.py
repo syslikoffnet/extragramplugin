@@ -69,7 +69,7 @@ __description__ = (
     "можно добавить локальные подарки. Настоящие подарки плагин не трогает."
 )
 __author__ = "@extragramplugin"
-__version__ = "1.1.9"
+__version__ = "1.2.0"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=11.0.0"
 __sdk_version__ = ">=1.4.3.3"
@@ -457,6 +457,7 @@ class LocalSnosPlugin(BasePlugin):
         self._picker_gifts: List[Any] = []
         self._gift_count_bump = 0
         self._live_gift_sheets: List[Any] = []
+        self._sheet_rec_ids: Dict[int, str] = {}
         self._suppress_gift_error = 0
         self._local_upgrade_tokens: Set[int] = set()
         self._serving_upgrade = False
@@ -486,7 +487,7 @@ class LocalSnosPlugin(BasePlugin):
             self.add_on_send_message_hook()
         except Exception:
             _safe_log(f"add_on_send_message_hook failed:\n{_format_exc()}")
-        self.log("Local Snos 1.1.9 loaded")
+        self.log("Local Snos 1.2.0 loaded")
         run_on_ui_thread(self._reapply_all, 400)
         run_on_ui_thread(self._reapply_all, 1800)
         run_on_ui_thread(self._prefetch_catalog, 700)
@@ -2589,10 +2590,7 @@ class LocalSnosPlugin(BasePlugin):
         rec = self._local_from_sheet(sheet, getattr(param, "args", None))
         if rec is None:
             return
-        try:
-            setattr(sheet, "_local_snos_gift", rec.get("id"))
-        except Exception:
-            pass
+        self._mark_local_sheet(sheet, rec)
         self._prepare_local_sheet(sheet, rec)
 
     def _after_gift_sheet_set(self, param: Any) -> None:
@@ -2632,18 +2630,37 @@ class LocalSnosPlugin(BasePlugin):
         flags &= ~SAVED_FLAG_SAVED_ID
         self._set_int(saved, "flags", flags)
 
+    def _mark_local_sheet(self, sheet: Any, rec: Optional[Dict[str, Any]]) -> None:
+        if sheet is None or rec is None:
+            return
+        try:
+            self._sheet_rec_ids[id(sheet)] = _as_str(rec.get("id"))
+        except Exception:
+            pass
+        try:
+            setattr(sheet, "_local_snos_gift", rec.get("id"))
+        except Exception:
+            pass
+        if sheet not in self._live_gift_sheets:
+            self._live_gift_sheets.append(sheet)
+            if len(self._live_gift_sheets) > 8:
+                self._live_gift_sheets = self._live_gift_sheets[-8:]
+
     def _before_gift_sheet_show(self, param: Any) -> None:
         sheet = getattr(param, "thisObject", None)
         rec = self._sheet_local_rec(sheet, getattr(param, "args", None))
         if rec is not None:
-            try:
-                setattr(sheet, "_local_snos_gift", rec.get("id"))
-            except Exception:
-                pass
+            self._mark_local_sheet(sheet, rec)
             self._prepare_local_sheet(sheet, rec)
         return
 
     def _sheet_local_rec(self, sheet: Any, args: Any = None) -> Optional[Dict[str, Any]]:
+        if sheet is not None:
+            mapped = self._sheet_rec_ids.get(id(sheet))
+            if mapped:
+                rec = self._gift_by_id(_as_str(mapped))
+                if rec is not None:
+                    return rec
         rec = self._local_from_sheet(sheet, args)
         if rec is not None:
             return rec
@@ -2720,10 +2737,7 @@ class LocalSnosPlugin(BasePlugin):
         if rec is None:
             return
         self._skip_void(param)
-        try:
-            setattr(sheet, "_local_snos_gift", rec.get("id"))
-        except Exception:
-            pass
+        self._mark_local_sheet(sheet, rec)
         self._prepare_local_sheet(sheet, rec)
         run_on_ui_thread(lambda s=sheet, r=rec: self._open_local_upgrade_page(s, r), 10)
 
@@ -2751,8 +2765,10 @@ class LocalSnosPlugin(BasePlugin):
                 result = self._java_call(sheet, "openUpgradeAfter")
                 opened = result is not False
             if not opened:
-                # Still keep native sheet; user can tap Confirm if page switched.
                 _safe_log("openUpgradeAfter missing, staying on info page")
+            self._bind_confirm_button(sheet, rec)
+            run_on_ui_thread(lambda s=sheet, r=rec: self._bind_confirm_button(s, r), 200)
+            run_on_ui_thread(lambda s=sheet, r=rec: self._bind_confirm_button(s, r), 500)
 
         samples = self._sheet_sample_attributes()
         if samples:
@@ -2828,113 +2844,201 @@ class LocalSnosPlugin(BasePlugin):
         if rec is None:
             return
         self._skip_void(param)
+        self._mark_local_sheet(sheet, rec)
         gift_id = _as_str(rec.get("id") or "")
         run_on_ui_thread(lambda s=sheet, gid=gift_id: self._complete_sheet_upgrade(s, gid), 10)
 
-    def _complete_sheet_upgrade(self, sheet: Any, gift_id: str) -> None:
-        rec = self._gift_by_id(gift_id)
-        if rec is None:
-            return
-        if rec.get("upgraded"):
-            self._toast_info("Этот подарок уже коллекционный")
-            return
-
-        def _after(meta: Dict[str, Any], attrs: Any = None) -> None:
-            live = self._gift_by_id(gift_id)
-            if live is None:
-                return
-            if meta:
-                live["unique"] = meta
-            live["upgraded"] = True
-            live["upgraded_at"] = int(time.time())
-            if attrs is not None:
-                self._unique_attr_refs[str(live.get("id"))] = attrs
-            catalog = self._catalog_by_id.get(_as_int(live.get("gift_id")))
-            if attrs is None:
-                attrs = self._synthetic_unique_attrs(live, catalog)
-                if attrs is not None:
-                    self._unique_attr_refs[str(live.get("id"))] = attrs
-            self._persist_gifts()
-            unique_obj = self._build_unique_gift(live, catalog)
-            updates = self._build_upgrade_updates(live, unique_obj)
-            if sheet is not None and updates is not None:
-                if self._apply_sheet_upgrade(sheet, live, updates):
-                    run_on_ui_thread(self._refresh_gifts_ui, 1800)
-                    return
-            self._upgrade_local_gift(gift_id)
-
-        samples = self._sheet_sample_attributes()
-        if samples:
-            fallback = rec.get("unique") or self._roll_unique(rec)
-            meta, attrs = self._unique_from_preview(
-                rec, type("P", (), {"sample_attributes": samples})(), fallback
-            )
-            _after(meta, attrs)
-            return
-        try:
-            self._fetch_upgrade_preview(rec, _after)
-        except Exception:
-            _safe_log(f"sheet upgrade preview failed:\n{_format_exc()}")
-            _after(self._roll_unique(rec), None)
-
-    def _apply_sheet_upgrade(self, sheet: Any, rec: Dict[str, Any], updates: Any) -> bool:
-        input_gift = None
-        for name in ("getInputStarGift",):
-            method = getattr(sheet, name, None)
-            if callable(method):
-                try:
-                    input_gift = method()
-                    break
-                except Exception:
-                    input_gift = None
-        if input_gift is None:
-            input_gift = self._java_call(sheet, "getInputStarGift")
-        button = None
-        try:
-            button = get_private_field(sheet, "button")
-        except Exception:
-            button = getattr(sheet, "button", None)
-        try:
-            if button is not None:
-                button.setLoading(True)
-        except Exception:
-            pass
-
-        def _done() -> None:
+    def _sheet_button(self, sheet: Any) -> Any:
+        if sheet is None:
+            return None
+        for name in ("button", "actionButton", "premiumButton"):
             try:
-                if button is not None:
-                    button.setLoading(False)
+                value = get_private_field(sheet, name)
             except Exception:
-                pass
-            switch = getattr(sheet, "switchPage", None)
-            if callable(switch):
+                value = getattr(sheet, name, None)
+            if value is not None:
+                return value
+        return None
+
+    def _stop_sheet_loading(self, sheet: Any) -> None:
+        button = self._sheet_button(sheet)
+        if button is None:
+            return
+        for args in ((False,), (False, True), (False, False)):
+            try:
+                button.setLoading(*args)
+                return
+            except Exception:
+                continue
+
+    def _switch_sheet_info(self, sheet: Any) -> None:
+        if sheet is None:
+            return
+        switch = getattr(sheet, "switchPage", None)
+        if callable(switch):
+            try:
+                switch(_jint(0), True)
+                return
+            except Exception:
                 try:
-                    switch(_jint(0), True)
+                    switch(0, True)
                     return
                 except Exception:
                     pass
-            self._java_call(sheet, "switchPage", _jint(0), True)
+        self._java_call(sheet, "switchPage", _jint(0), True)
 
-        applied = False
+    def _as_click_listener(self, fn: Callable) -> Any:
+        try:
+            from android.view import View
+
+            class _Click(View.OnClickListener):
+                def onClick(self, view: Any) -> None:
+                    try:
+                        fn(view)
+                    except Exception:
+                        _safe_log(f"click listener failed:\n{_format_exc()}")
+
+            return _Click()
+        except Exception:
+            return fn
+
+    def _bind_confirm_button(self, sheet: Any, rec: Dict[str, Any]) -> None:
+        button = self._sheet_button(sheet)
+        if button is None or rec is None:
+            return
+        gift_id = _as_str(rec.get("id") or "")
+        self._mark_local_sheet(sheet, rec)
+
+        def _on_click(_view: Any = None) -> None:
+            self._stop_sheet_loading(sheet)
+            self._complete_sheet_upgrade(sheet, gift_id)
+
+        listener = self._as_click_listener(_on_click)
+        try:
+            button.setOnClickListener(listener)
+        except Exception:
+            _safe_log(f"bind confirm failed:\n{_format_exc()}")
+
+    def _complete_sheet_upgrade(self, sheet: Any, gift_id: str) -> None:
+        self._stop_sheet_loading(sheet)
+        rec = self._gift_by_id(gift_id)
+        if rec is None:
+            self._stop_sheet_loading(sheet)
+            return
+        if rec.get("upgraded"):
+            self._stop_sheet_loading(sheet)
+            self._switch_sheet_info(sheet)
+            self._refresh_gifts_ui()
+            return
+        try:
+            catalog = self._catalog_by_id.get(_as_int(rec.get("gift_id")))
+            meta = rec.get("unique") or self._roll_unique(rec)
+            attrs = None
+            samples = self._sheet_sample_attributes()
+            if samples:
+                try:
+                    meta, attrs = self._unique_from_preview(
+                        rec, type("P", (), {"sample_attributes": samples})(), meta
+                    )
+                except Exception:
+                    _safe_log(f"samples pick failed:\n{_format_exc()}")
+            rec["unique"] = meta
+            rec["upgraded"] = True
+            rec["upgraded_at"] = int(time.time())
+            if attrs is None:
+                attrs = self._synthetic_unique_attrs(rec, catalog)
+            if attrs is not None:
+                self._unique_attr_refs[str(rec.get("id"))] = attrs
+            self._persist_gifts()
+            unique_obj = self._build_unique_gift(rec, catalog)
+            applied = False
+            updates = self._build_upgrade_updates(rec, unique_obj) if unique_obj is not None else None
+            if sheet is not None and updates is not None:
+                try:
+                    applied = bool(self._apply_sheet_upgrade(sheet, rec, updates))
+                except Exception:
+                    applied = False
+                    _safe_log(f"apply sheet upgrade failed:\n{_format_exc()}")
+            if not applied and sheet is not None:
+                self._force_sheet_unique(sheet, rec, unique_obj)
+            self._switch_sheet_info(sheet)
+            self._refresh_gifts_ui()
+            title = self._gift_title(rec)
+            num = _as_int((rec.get("unique") or {}).get("num"))
+            self._toast_success(f"{title} стал коллекционным #{num}")
+        except Exception:
+            _safe_log(f"complete upgrade crashed:\n{_format_exc()}")
+            try:
+                self._upgrade_local_gift(gift_id)
+            except Exception:
+                pass
+        finally:
+            self._stop_sheet_loading(sheet)
+
+    def _force_sheet_unique(self, sheet: Any, rec: Dict[str, Any], unique_obj: Any) -> None:
+        if sheet is None or unique_obj is None:
+            return
+        saved = None
+        for name in ("savedStarGift", "savedGift", "saved_gift"):
+            try:
+                saved = get_private_field(sheet, name)
+            except Exception:
+                saved = getattr(sheet, name, None)
+            if saved is not None:
+                break
+        if saved is not None:
+            self._set_field(saved, "gift", unique_obj)
+            self._set_bool(saved, "can_upgrade", False)
+            flags = _as_int(getattr(saved, "flags", 0))
+            flags &= ~SAVED_FLAG_CAN_UPGRADE
+            flags &= ~SAVED_FLAG_UPGRADE_STARS
+            self._set_int(saved, "flags", flags)
+        try:
+            self._set_bool(sheet, "rolling", True)
+        except Exception:
+            pass
+        gifts_list = None
+        try:
+            gifts_list = get_private_field(sheet, "giftsList")
+        except Exception:
+            gifts_list = getattr(sheet, "giftsList", None)
+        setter = getattr(sheet, "set", None)
+        if callable(setter) and saved is not None:
+            for args in ((saved, gifts_list), (saved,)):
+                try:
+                    setter(*args)
+                    break
+                except Exception:
+                    continue
+        try:
+            self._set_bool(sheet, "rolling", False)
+        except Exception:
+            pass
+
+    def _apply_sheet_upgrade(self, sheet: Any, rec: Dict[str, Any], updates: Any) -> bool:
+        if sheet is None or updates is None:
+            return False
+        input_gift = None
+        method = getattr(sheet, "getInputStarGift", None)
+        if callable(method):
+            try:
+                input_gift = method()
+            except Exception:
+                input_gift = None
+        if input_gift is None:
+            result = self._java_call(sheet, "getInputStarGift")
+            if result is not False:
+                input_gift = result
+        done = self._as_runnable(lambda: None)
         method = getattr(sheet, "applyNewGiftFromUpdates", None)
         if callable(method):
             try:
-                method(input_gift, updates, self._as_runnable(_done))
-                applied = True
+                method(input_gift, updates, done)
+                return True
             except Exception:
                 _safe_log(f"applyNewGiftFromUpdates call failed:\n{_format_exc()}")
-        if not applied:
-            applied = bool(
-                self._java_call(
-                    sheet,
-                    "applyNewGiftFromUpdates",
-                    input_gift,
-                    updates,
-                    self._as_runnable(_done),
-                )
-                is not False
-            )
-        return applied
+        invoked = self._java_call(sheet, "applyNewGiftFromUpdates", input_gift, updates, done)
+        return invoked is not False
 
     def _as_runnable(self, fn: Callable[[], None]) -> Any:
         try:
